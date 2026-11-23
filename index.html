@@ -55,7 +55,7 @@
   <div id="overlay">
     <div id="status">Loading Undertale files...</div>
     <div id="bar"><div id="fill"></div></div>
-    <button id="play-btn">▶ CLICK OR PRESS ENTER TO START</button>
+    <button id="play-btn">CLICK OR PRESS ENTER TO START</button>
   </div>
 
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
@@ -69,7 +69,6 @@
     const playBtn = document.getElementById('play-btn');
     const canvas = document.getElementById('canvas');
 
-    // Every single external Undertale .ogg music & sound file
     const OGG_FILES = [
       "abc_123_a.ogg", "mus_a2.ogg", "mus_afraid.ogg", "mus_alarms.ogg", "mus_alphys.ogg",
       "mus_amalgam.ogg", "mus_ambientwater.ogg", "mus_anothermedium.ogg", "mus_autogameover.ogg",
@@ -154,7 +153,6 @@
       );
     }
 
-    // 1. Preload all files into OPFS /butterscotch/game/ BEFORE starting the runner
     async function prepareFiles() {
       const opfsRoot = await navigator.storage.getDirectory();
       const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
@@ -204,16 +202,15 @@
       playBtn.style.display = 'inline-block';
     }
 
-    // 2. Start Butterscotch AFTER user click/keypress (unlocks WebAudio + SDL2 keyboard focus!)
+    let started = false;
+    async function launchGame() {
+      if (started) return;
+      started = true;
+      playBtn.style.display = 'none';
+      statusEl.textContent = 'Starting Undertale...';
 
-let started = false;
-async function launchGame() {
-if (started) return;
-started = true;
-playBtn.style.display = 'none';
-statusEl.textContent = 'Starting Undertale...';
-try {
-window.focus();
+      try {
+        window.focus();
 canvas.focus();
 const instance = await createButterscotch({
 canvas,
@@ -225,7 +222,7 @@ await instance._mountOpfs();
 overlayEl.style.display = 'none';
 window.focus();
 canvas.focus();
-await callStartRunnerWithArgs(instance, ['butterscotch/game/data.win']);
+await callStartRunnerWithArgs(instance, ['/butterscotch/game/data.win']);
 } catch (err) {
 console.error(err);
 overlayEl.style.display = 'flex';
