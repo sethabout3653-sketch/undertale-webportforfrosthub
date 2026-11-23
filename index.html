@@ -3,48 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Undertale</title>
+  <title>UNDERTALEWEBPORT(60fps)</title>
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
-      width: 100%;
-      height: 100%;
-      background: #000;
-      color: #fff;
-      font-family: monospace;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      width: 100%; height: 100%;
+      background: #000; color: #fff; font-family: monospace;
+      display: flex; align-items: center; justify-content: center;
       overflow: hidden;
     }
-    #loader {
-      position: absolute;
-      text-align: center;
-      z-index: 10;
-    }
-    #bar {
-      width: 280px;
-      height: 12px;
-      border: 2px solid #fff;
-      margin-top: 10px;
-      padding: 2px;
-    }
-    #fill {
-      width: 0%;
-      height: 100%;
-      background: #fff;
-      transition: width 0.1s linear;
-    }
+    #loader { position: absolute; text-align: center; z-index: 10; }
+    #bar { width: 280px; height: 12px; border: 2px solid #fff; margin-top: 10px; padding: 2px; }
+    #fill { width: 0%; height: 100%; background: #fff; transition: width 0.1s linear; }
     canvas#canvas {
-      display: block;
-      width: 100vw;
-      height: 100vh;
-      object-fit: contain;
-      image-rendering: pixelated;
+      display: block; width: 100vw; height: 100vh;
+      object-fit: contain; image-rendering: pixelated;
     }
   </style>
 </head>
@@ -78,7 +51,6 @@
 
     async function boot() {
       try {
-        // 1. Optional audio manifest (game/files.json)
         setProgress(5, 'Checking audio manifest...');
         let oggFiles = [];
         try {
@@ -89,7 +61,6 @@
         const total = 1 + oggFiles.length;
         let done = 0;
 
-        // 2. Write game files into OPFS
         const opfsRoot = await navigator.storage.getDirectory();
         const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
 
@@ -119,42 +90,37 @@
           );
         }
 
-        // 3. Initialize Butterscotch WebAssembly runtime
         setProgress(90, 'Starting WebAssembly...');
         const instance = await createButterscotch({
           canvas,
           locateFile: (path) => `./${path}`
         });
 
-        // 4. Mount OPFS inside WasmFS
         setProgress(95, 'Mounting game storage...');
         if (typeof instance._mountOpfs === 'function') {
           await instance._mountOpfs();
         }
 
-        // 5. Launch the runner using ccall (safe stack string allocation)
+        // Verify WasmFS can see the files inside /opfs/game
+        console.log('OPFS files in WasmFS:', instance.FS.readdir('/opfs/game'));
+
         setProgress(98, 'Launching Undertale...');
         loaderEl.style.display = 'none';
         canvas.focus();
 
-        const candidates = [
-          '/opfs/game/data.win',
-          '/opfs/data.win',
-          'game/data.win',
-          'data.win'
-        ];
-
-        for (const gamePath of candidates) {
-          console.log('Trying startRunner with:', gamePath);
-          const result = await instance.ccall(
-            'startRunner',
-            'number',
-            ['string'],
-            [gamePath],
-            { async: true }
-          );
-          console.log('startRunner returned:', result);
-          if (result === 0 || result === true) break;
+        // Try folder path first (/opfs/game), then 0-arg startRunner, then /opfs
+        try {
+          console.log('Calling startRunner("/opfs/game")...');
+          await instance.ccall('startRunner', 'void', ['string'], ['/opfs/game'], { async: true });
+        } catch (e1) {
+          console.warn('startRunner("/opfs/game") failed:', e1);
+          try {
+            console.log('Calling startRunner() with 0 args...');
+            await instance.ccall('startRunner', 'void', [], [], { async: true });
+          } catch (e2) {
+            console.warn('startRunner() failed:', e2);
+            await instance.ccall('startRunner', 'void', ['string'], ['/opfs'], { async: true });
+          }
         }
       } catch (err) {
         console.error(err);
