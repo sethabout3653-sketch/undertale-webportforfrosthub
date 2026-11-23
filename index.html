@@ -20,7 +20,7 @@
       position: fixed;
       bottom: 12px;
       right: 12px;
-      background: rgba(0, 0, 0, 0.8);
+      background: rgba(0, 0, 0, 0.85);
       border: 1px solid #fff;
       padding: 6px 10px;
       font-size: 12px;
@@ -43,7 +43,7 @@
     <div id="bar"><div id="fill"></div></div>
   </div>
 
-  <div id="sound-hint" style="display:none;">Click or press Z / Enter to enable sound & controls</div>
+  <div id="sound-hint" style="display:none;">Click or press Z / Enter to enable sound</div>
 
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
 
@@ -61,42 +61,53 @@
       if (msg) statusEl.textContent = msg;
     }
 
-    // Keep focus locked on the game canvas (essential when embedded in an iframe)
     function focusGame() {
       window.focus();
-      canvas.focus();
+      if (document.activeElement !== canvas) {
+        canvas.focus();
+      }
     }
 
-    // Prevent Arrow keys / Spacebar from scrolling outer pages or losing focus
-    window.addEventListener('keydown', (e) => {
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
-        e.preventDefault();
-      }
-      focusGame();
-      unlockAudio();
-    }, { passive: false });
-
-    window.addEventListener('pointerdown', () => {
-      focusGame();
-      unlockAudio();
-    });
-
-    // Resume WebAudio contexts on first user interaction so all music & SFX play
+    // Resume WebAudio contexts whenever user clicks or presses a key
     function unlockAudio() {
+      let anySuspended = false;
       try {
         if (window.miniaudio && typeof window.miniaudio.unlock === 'function') {
           window.miniaudio.unlock();
         }
         if (window.miniaudio && Array.isArray(window.miniaudio.devices)) {
           for (const dev of window.miniaudio.devices) {
-            if (dev && dev.webaudio && dev.webaudio.state === 'suspended') {
-              dev.webaudio.resume().catch(() => {});
+            if (dev && dev.webaudio) {
+              if (dev.webaudio.state === 'suspended') {
+                anySuspended = true;
+                dev.webaudio.resume().catch(() => {});
+              }
             }
           }
         }
       } catch {}
-      soundHintEl.style.display = 'none';
+      if (!anySuspended) {
+        soundHintEl.style.display = 'none';
+      }
     }
+
+    // Capture-phase listeners so SDL2 always receives Z, Enter, X, C, and Arrow keys
+    window.addEventListener('keydown', (e) => {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
+        e.preventDefault();
+      }
+      focusGame();
+      unlockAudio();
+    }, true);
+
+    window.addEventListener('keyup', () => {
+      unlockAudio();
+    }, true);
+
+    window.addEventListener('pointerdown', () => {
+      focusGame();
+      unlockAudio();
+    }, true);
 
     async function writeToOpfs(dirHandle, fileName, bytes) {
       const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
@@ -105,9 +116,8 @@
       await writable.close();
     }
 
-    // Automatically discover all .ogg files in ./game/ (via local files.json OR GitHub Pages API)
+    // Fixed GitHub API discovery ([0] indexing) + local files.json fallback
     async function discoverOggFiles() {
-      // 1. Try local game/files.json first if present
       try {
         const localRes = await fetch('./game/files.json');
         if (localRes.ok) {
@@ -116,7 +126,6 @@
         }
       } catch {}
 
-      // 2. Automatically query GitHub Contents API when hosted on *.github.io
       try {
         const host = window.location.hostname;
         if (host.endsWith('.github.io')) {
@@ -137,7 +146,7 @@
           }
         }
       } catch (e) {
-        console.warn('GitHub API audio discovery skipped:', e);
+        console.warn('GitHub API audio discovery failed:', e);
       }
 
       return [];
@@ -162,7 +171,7 @@
       try {
         setProgress(3, 'Finding game & audio files...');
         const oggFiles = await discoverOggFiles();
-        console.log(`Found ${oggFiles.length} .ogg audio files`);
+        console.log(`Discovered ${oggFiles.length} .ogg music/sound files`);
 
         const total = 1 + oggFiles.length;
         let done = 0;
@@ -170,7 +179,6 @@
         const opfsRoot = await navigator.storage.getDirectory();
         const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
 
-        // Check if data.win is already cached in OPFS so repeat visits boot instantly
         let hasCachedDataWin = false;
         try {
           const existing = await gameDir.getFileHandle('data.win');
@@ -188,7 +196,7 @@
         done++;
         setProgress((done / total) * 85, `Loaded data.win (${done}/${total})`);
 
-        // Fetch and cache all .ogg music & sound tracks into OPFS /butterscotch/game/
+        // Download & cache every .ogg track into /butterscotch/game/
         const BATCH_SIZE = 15;
         for (let i = 0; i < oggFiles.length; i += BATCH_SIZE) {
           const batch = oggFiles.slice(i, i + BATCH_SIZE);
@@ -215,8 +223,11 @@
         }
 
         setProgress(90, 'Starting WebAssembly...');
+        // Bind SDL2 keyboard listening directly to window so Z, Enter, X, C, Arrows always work
         const instance = await createButterscotch({
           canvas,
+          keyboardListeningElement: window,
+          doNotCaptureKeyboard: false,
           locateFile: (path) => `./${path}`
         });
 
@@ -230,6 +241,10 @@
         loaderEl.style.display = 'none';
         soundHintEl.style.display = 'block';
         focusGame();
+
+        // Keep trying to unlock audio for the first few seconds after runner starts
+        const unlockInterval = setInterval(unlockAudio, 500);
+        setTimeout(() => clearInterval(unlockInterval), 10000);
 
         await callStartRunnerWithArgs(instance, [gameDataPath]);
       } catch (err) {
