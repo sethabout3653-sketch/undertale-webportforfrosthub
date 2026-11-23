@@ -11,13 +11,29 @@
       background: #000; color: #fff; font-family: monospace;
       display: flex; align-items: center; justify-content: center;
       overflow: hidden;
+      user-select: none;
     }
-    #loader { position: absolute; text-align: center; z-index: 10; }
+    #loader { position: absolute; text-align: center; z-index: 10; pointer-events: none; }
     #bar { width: 280px; height: 12px; border: 2px solid #fff; margin-top: 10px; padding: 2px; }
     #fill { width: 0%; height: 100%; background: #fff; transition: width 0.1s linear; }
+    #sound-hint {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      background: rgba(0, 0, 0, 0.8);
+      border: 1px solid #fff;
+      padding: 6px 10px;
+      font-size: 12px;
+      z-index: 20;
+      cursor: pointer;
+    }
     canvas#canvas {
-      display: block; width: 100vw; height: 100vh;
-      object-fit: contain; image-rendering: pixelated;
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      image-rendering: pixelated;
+      outline: none;
     }
   </style>
 </head>
@@ -27,7 +43,9 @@
     <div id="bar"><div id="fill"></div></div>
   </div>
 
-  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <div id="sound-hint" style="display:none;">Click or press Z / Enter to enable sound & controls</div>
+
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
 
   <script type="module">
     import createButterscotch from './butterscotch.mjs';
@@ -35,11 +53,49 @@
     const statusEl = document.getElementById('status');
     const fillEl = document.getElementById('fill');
     const loaderEl = document.getElementById('loader');
+    const soundHintEl = document.getElementById('sound-hint');
     const canvas = document.getElementById('canvas');
 
     function setProgress(pct, msg) {
       fillEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
       if (msg) statusEl.textContent = msg;
+    }
+
+    // Keep focus locked on the game canvas (essential when embedded in an iframe)
+    function focusGame() {
+      window.focus();
+      canvas.focus();
+    }
+
+    // Prevent Arrow keys / Spacebar from scrolling outer pages or losing focus
+    window.addEventListener('keydown', (e) => {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
+        e.preventDefault();
+      }
+      focusGame();
+      unlockAudio();
+    }, { passive: false });
+
+    window.addEventListener('pointerdown', () => {
+      focusGame();
+      unlockAudio();
+    });
+
+    // Resume WebAudio contexts on first user interaction so all music & SFX play
+    function unlockAudio() {
+      try {
+        if (window.miniaudio && typeof window.miniaudio.unlock === 'function') {
+          window.miniaudio.unlock();
+        }
+        if (window.miniaudio && Array.isArray(window.miniaudio.devices)) {
+          for (const dev of window.miniaudio.devices) {
+            if (dev && dev.webaudio && dev.webaudio.state === 'suspended') {
+              dev.webaudio.resume().catch(() => {});
+            }
+          }
+        }
+      } catch {}
+      soundHintEl.style.display = 'none';
     }
 
     async function writeToOpfs(dirHandle, fileName, bytes) {
@@ -49,7 +105,44 @@
       await writable.close();
     }
 
-    // startRunner(argc, argv) reads argv[0] directly as the path to data.win!
+    // Automatically discover all .ogg files in ./game/ (via local files.json OR GitHub Pages API)
+    async function discoverOggFiles() {
+      // 1. Try local game/files.json first if present
+      try {
+        const localRes = await fetch('./game/files.json');
+        if (localRes.ok) {
+          const list = await localRes.json();
+          if (Array.isArray(list) && list.length > 0) return list;
+        }
+      } catch {}
+
+      // 2. Automatically query GitHub Contents API when hosted on *.github.io
+      try {
+        const host = window.location.hostname;
+        if (host.endsWith('.github.io')) {
+          const owner = host.split('.')[0];
+          const pathParts = window.location.pathname.split('/').filter(Boolean);
+          if (pathParts.length > 0) {
+            const repo = pathParts[0];
+            const apiUrl = `https://github.com{owner}/${repo}/contents/game`;
+            const ghRes = await fetch(apiUrl);
+            if (ghRes.ok) {
+              const items = await ghRes.json();
+              if (Array.isArray(items)) {
+                return items
+                  .filter((item) => item.type === 'file' && item.name.toLowerCase().endsWith('.ogg'))
+                  .map((item) => item.name);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('GitHub API audio discovery skipped:', e);
+      }
+
+      return [];
+    }
+
     function callStartRunnerWithArgs(instance, args) {
       const argvPtrs = args.map((str) => instance.stringToNewUTF8(str));
       const argvTable = new Uint32Array(argvPtrs.length + 1);
@@ -67,40 +160,56 @@
 
     async function boot() {
       try {
-        setProgress(5, 'Checking audio manifest...');
-        let oggFiles = [];
-        try {
-          const listRes = await fetch('./game/files.json');
-          if (listRes.ok) oggFiles = await listRes.json();
-        } catch {}
+        setProgress(3, 'Finding game & audio files...');
+        const oggFiles = await discoverOggFiles();
+        console.log(`Found ${oggFiles.length} .ogg audio files`);
 
         const total = 1 + oggFiles.length;
         let done = 0;
 
-        // Write files into OPFS (which mounts at /butterscotch in WasmFS!)
         const opfsRoot = await navigator.storage.getDirectory();
         const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
 
-        setProgress(10, 'Downloading data.win...');
-        const dataRes = await fetch('./game/data.win');
-        if (!dataRes.ok) throw new Error(`Failed to load ./game/data.win (${dataRes.status})`);
-        const dataBytes = new Uint8Array(await dataRes.arrayBuffer());
+        // Check if data.win is already cached in OPFS so repeat visits boot instantly
+        let hasCachedDataWin = false;
+        try {
+          const existing = await gameDir.getFileHandle('data.win');
+          const file = await existing.getFile();
+          if (file.size > 1000000) hasCachedDataWin = true;
+        } catch {}
 
-        await writeToOpfs(gameDir, 'data.win', dataBytes);
+        if (!hasCachedDataWin) {
+          setProgress(8, 'Downloading data.win...');
+          const dataRes = await fetch('./game/data.win');
+          if (!dataRes.ok) throw new Error(`Failed to load ./game/data.win (${dataRes.status})`);
+          const dataBytes = new Uint8Array(await dataRes.arrayBuffer());
+          await writeToOpfs(gameDir, 'data.win', dataBytes);
+        }
         done++;
         setProgress((done / total) * 85, `Loaded data.win (${done}/${total})`);
 
-        for (let i = 0; i < oggFiles.length; i += 10) {
-          const batch = oggFiles.slice(i, i + 10);
+        // Fetch and cache all .ogg music & sound tracks into OPFS /butterscotch/game/
+        const BATCH_SIZE = 15;
+        for (let i = 0; i < oggFiles.length; i += BATCH_SIZE) {
+          const batch = oggFiles.slice(i, i + BATCH_SIZE);
           await Promise.all(
             batch.map(async (name) => {
-              const res = await fetch(`./game/${encodeURIComponent(name)}`);
-              if (res.ok) {
-                const bytes = new Uint8Array(await res.arrayBuffer());
-                await writeToOpfs(gameDir, name, bytes);
+              let cached = false;
+              try {
+                const existing = await gameDir.getFileHandle(name);
+                const f = await existing.getFile();
+                if (f.size > 0) cached = true;
+              } catch {}
+
+              if (!cached) {
+                const res = await fetch(`./game/${encodeURIComponent(name)}`);
+                if (res.ok) {
+                  const bytes = new Uint8Array(await res.arrayBuffer());
+                  await writeToOpfs(gameDir, name, bytes);
+                }
               }
               done++;
-              setProgress((done / total) * 85, `Loading audio (${done}/${total})...`);
+              setProgress((done / total) * 85, `Loading music & sounds (${done}/${total})...`);
             })
           );
         }
@@ -116,15 +225,12 @@
           await instance._mountOpfs();
         }
 
-        // OPFS mounts at /butterscotch, so our folder is /butterscotch/game/data.win
         const gameDataPath = '/butterscotch/game/data.win';
-        console.log('Launching Butterscotch with:', gameDataPath);
-
         setProgress(98, 'Launching Undertale...');
         loaderEl.style.display = 'none';
-        canvas.focus();
+        soundHintEl.style.display = 'block';
+        focusGame();
 
-        // Pass ['/butterscotch/game/data.win'] as argv[0]!
         await callStartRunnerWithArgs(instance, [gameDataPath]);
       } catch (err) {
         console.error(err);
@@ -133,7 +239,6 @@
       }
     }
 
-    window.addEventListener('click', () => canvas.focus());
     boot();
   </script>
 </body>
