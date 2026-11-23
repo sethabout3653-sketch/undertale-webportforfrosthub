@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Undertale</title>
+  <title>UNDERTALE</title>
   <style>
     * {
       box-sizing: border-box;
@@ -50,7 +50,7 @@
 </head>
 <body>
   <div id="loader">
-    <div id="status">Starting Butterscotch...</div>
+    <div id="status">Loading Undertale...</div>
     <div id="bar"><div id="fill"></div></div>
   </div>
 
@@ -69,17 +69,27 @@
       if (msg) statusEl.textContent = msg;
     }
 
-    async function writeToOpfs(dirHandle, fileName, arrayBuffer) {
+    async function writeToOpfs(dirHandle, fileName, bytes) {
       const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
       const writable = await fileHandle.createWritable();
-      await writable.write(arrayBuffer);
+      await writable.write(bytes);
       await writable.close();
+    }
+
+    // Helper to pass a JS string into Wasm memory without needing ccall
+    function allocCString(instance, str) {
+      const encoded = new TextEncoder().encode(str + '\0');
+      const malloc = instance._malloc || instance.malloc;
+      if (!malloc) return 0;
+      const ptr = malloc(encoded.length);
+      instance.HEAPU8.set(encoded, ptr);
+      return ptr;
     }
 
     async function boot() {
       try {
-        // 1. Check for optional audio list (game/files.json)
-        setProgress(5, 'Checking game files...');
+        // 1. Optional audio manifest (game/files.json)
+        setProgress(5, 'Checking audio manifest...');
         let oggFiles = [];
         try {
           const listRes = await fetch('./game/files.json');
@@ -89,15 +99,16 @@
         const total = 1 + oggFiles.length;
         let done = 0;
 
-        // 2. Write data.win & .ogg files into OPFS (used by Butterscotch WasmFS)
+        // 2. Write game files into OPFS (mounted by Butterscotch WasmFS)
         const opfsRoot = await navigator.storage.getDirectory();
         const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
 
-        setProgress(10, 'Loading data.win...');
+        setProgress(10, 'Downloading data.win...');
         const dataRes = await fetch('./game/data.win');
-        if (!dataRes.ok) throw new Error(`Missing ./game/data.win (${dataRes.status})`);
+        if (!dataRes.ok) throw new Error(`Failed to load ./game/data.win (${dataRes.status})`);
         const dataBytes = new Uint8Array(await dataRes.arrayBuffer());
 
+        // Write to both OPFS root and /game so any path lookup succeeds
         await writeToOpfs(opfsRoot, 'data.win', dataBytes);
         await writeToOpfs(gameDir, 'data.win', dataBytes);
         done++;
@@ -119,37 +130,38 @@
           );
         }
 
-        // 3. Initialize butterscotch.mjs + butterscotch.wasm
-        setProgress(90, 'Booting WebAssembly...');
+        // 3. Initialize Butterscotch WebAssembly runtime
+        setProgress(90, 'Starting WebAssembly...');
         const instance = await createButterscotch({
           canvas,
-          locateFile: (path) => `./${path}`,
-          arguments: ['/data.win'],
-          noInitialRun: true
+          locateFile: (path) => `./${path}`
         });
 
-        // Also mirror files into Emscripten FS in case memory FS is checked first
-        try { instance.FS.mkdir('/game'); } catch {}
-        try {
-          instance.FS.writeFile('/data.win', dataBytes);
-          instance.FS.writeFile('/game/data.win', dataBytes);
-        } catch {}
-
-        // 4. Mount OPFS & trigger Butterscotch's exported entry points
-        if (instance._mountOpfs) await instance._mountOpfs();
-        if (instance.ccall) {
-          try { await instance.ccall('mountOpfs', 'void', [], [], { async: true }); } catch {}
-          try { await instance.ccall('startRunner', 'void', ['string'], ['/data.win'], { async: true }); } catch {}
-        }
-        if (instance.callMain) {
-          try { instance.callMain(['/data.win']); } catch {}
+        // 4. Mount OPFS inside WasmFS
+        setProgress(95, 'Mounting game storage...');
+        if (typeof instance._mountOpfs === 'function') {
+          await instance._mountOpfs();
         }
 
-        setProgress(100, 'Ready!');
+        // 5. Start the GameMaker runner directly
+        setProgress(98, 'Launching Undertale...');
         loaderEl.style.display = 'none';
         canvas.focus();
+
+        if (typeof instance._startRunner === 'function') {
+          const pathPtr = allocCString(instance, '/opfs/game/data.win');
+          const res = await instance._startRunner(pathPtr);
+          // Fallback if OPFS mounts at /opfs/data.win or /data.win
+          if (res === false || res < 0) {
+            const fallbackPtr = allocCString(instance, '/opfs/data.win');
+            await instance._startRunner(fallbackPtr);
+          }
+        } else {
+          throw new Error('_startRunner export not found on Butterscotch Module');
+        }
       } catch (err) {
         console.error(err);
+        loaderEl.style.display = 'block';
         statusEl.textContent = `Error: ${err.message}`;
       }
     }
