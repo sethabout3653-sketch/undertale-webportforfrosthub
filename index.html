@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>UNDERTALEWEBPORT(60fps)</title>
+  <title>Undertale</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
@@ -101,25 +101,31 @@
           await instance._mountOpfs();
         }
 
-        // Verify WasmFS can see the files inside /opfs/game
-        console.log('OPFS files in WasmFS:', instance.FS.readdir('/opfs/game'));
+        // Safely log root WasmFS directories if FS is exposed
+        try {
+          console.log('WasmFS root:', instance.FS.readdir('/'));
+          console.log('WasmFS /opfs:', instance.FS.readdir('/opfs'));
+        } catch (fsErr) {
+          console.log('FS check:', fsErr.message);
+        }
 
         setProgress(98, 'Launching Undertale...');
         loaderEl.style.display = 'none';
         canvas.focus();
 
-        // Try folder path first (/opfs/game), then 0-arg startRunner, then /opfs
-        try {
-          console.log('Calling startRunner("/opfs/game")...');
-          await instance.ccall('startRunner', 'void', ['string'], ['/opfs/game'], { async: true });
-        } catch (e1) {
-          console.warn('startRunner("/opfs/game") failed:', e1);
+        // Try folder path first (/opfs/game), then /opfs, then 0-arg startRunner
+        const attempts = [
+          () => instance.ccall('startRunner', 'void', ['string'], ['/opfs/game'], { async: true }),
+          () => instance.ccall('startRunner', 'void', ['string'], ['/opfs'], { async: true }),
+          () => instance.ccall('startRunner', 'void', [], [], { async: true })
+        ];
+
+        for (const runAttempt of attempts) {
           try {
-            console.log('Calling startRunner() with 0 args...');
-            await instance.ccall('startRunner', 'void', [], [], { async: true });
-          } catch (e2) {
-            console.warn('startRunner() failed:', e2);
-            await instance.ccall('startRunner', 'void', ['string'], ['/opfs'], { async: true });
+            await runAttempt();
+            break;
+          } catch (e) {
+            console.warn('Attempt failed:', e);
           }
         }
       } catch (err) {
