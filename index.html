@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Undertale</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
       width: 100%; height: 100%;
       background: #000; color: #fff; font-family: monospace;
@@ -209,70 +209,84 @@
       if (!hasDataWin) {
         setProgress(5, 'Downloading data.win...');
         const res = await fetch('./game/data.win');
+        if (!res.ok) throw new Error(`Missing ./game/data.win (${res.status})`);
+        await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
+      }
 
-if (!res.ok) throw new Error(Missing ./game/data.win (${res.status}));
-await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
-}
-done++;
-setProgress((done / total) * 100, Loaded data.win (${done}/${total}));
-const BATCH_SIZE = 20;
-for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
-const batch = OGG_FILES.slice(i, i + BATCH_SIZE);
-await Promise.all(
-batch.map(async (name) => {
-let cached = false;
-try {
-const f = await (await gameDir.getFileHandle(name)).getFile();
-if (f.size > 0) cached = true;
-} catch {}
-if (!cached) {
-const res = await fetch(./game/${name});
-if (res.ok) {
-await writeToOpfs(gameDir, name, new Uint8Array(await res.arrayBuffer()));
-}
-}
-done++;
-setProgress((done / total) * 100, Downloading music & audio (${done}/${total})...);
-})
-);
-}
-setProgress(100, 'All files ready!');
-playBtn.style.display = 'inline-block';
-}
-let started = false;
-async function launchGame() {
-if (started) return;
-started = true;
-playBtn.style.display = 'none';
-statusEl.textContent = 'Starting Undertale...';
-try {
-window.focus();
-canvas.focus();
-const instance = await createButterscotch({
-canvas,
-locateFile: (path) => ./${path}
-});
-if (typeof instance._mountOpfs === 'function') {
-await instance._mountOpfs();
-}
-bindButterscotchInputs(instance);
-overlayEl.style.display = 'none';
-window.focus();
-canvas.focus();
-await callStartRunnerWithArgs(instance, ['/butterscotch/game/data.win']);
-} catch (err) {
-console.error(err);
-overlayEl.style.display = 'flex';
-statusEl.textContent = Error: ${err.message};
-}
-}
-playBtn.addEventListener('click', launchGame);
-window.addEventListener('keydown', (e) => {
-if (!started && playBtn.style.display !== 'none' && (e.key === 'Enter' || e.key === 'z' || e.key === 'Z' || e.key === ' ')) {
-launchGame();
-}
-});
-prepareFiles().catch((err) => {
-console.error(err);
-statusEl.textContent = Error: ${err.message};
-});
+      done++;
+      setProgress((done / total) * 100, `Loaded data.win (${done}/${total})`);
+
+      const BATCH_SIZE = 20;
+      for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
+        const batch = OGG_FILES.slice(i, i + BATCH_SIZE);
+        await Promise.all(
+          batch.map(async (name) => {
+            let cached = false;
+            try {
+              const f = await (await gameDir.getFileHandle(name)).getFile();
+              if (f.size > 0) cached = true;
+            } catch {}
+
+            if (!cached) {
+              const res = await fetch(`./game/${name}`);
+              if (res.ok) {
+                await writeToOpfs(gameDir, name, new Uint8Array(await res.arrayBuffer()));
+              }
+            }
+
+            done++;
+            setProgress((done / total) * 100, `Downloading music & audio (${done}/${total})...`);
+          })
+        );
+      }
+
+      setProgress(100, 'All files ready!');
+      playBtn.style.display = 'inline-block';
+    }
+
+    let started = false;
+    async function launchGame() {
+      if (started) return;
+      started = true;
+      playBtn.style.display = 'none';
+      statusEl.textContent = 'Starting Undertale...';
+
+      try {
+        window.focus();
+        canvas.focus();
+        const instance = await createButterscotch({
+          canvas,
+          locateFile: (path) => `./${path}`
+        });
+
+        if (typeof instance._mountOpfs === 'function') {
+          await instance._mountOpfs();
+        }
+
+        bindButterscotchInputs(instance);
+        overlayEl.style.display = 'none';
+        window.focus();
+        canvas.focus();
+
+        await callStartRunnerWithArgs(instance, ['/butterscotch/game/data.win']);
+      } catch (err) {
+        console.error(err);
+        overlayEl.style.display = 'flex';
+        statusEl.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    playBtn.addEventListener('click', launchGame);
+    window.addEventListener('keydown', (e) => {
+      if (!started && playBtn.style.display !== 'none' && (e.key === 'Enter' || e.key === 'z' || e.key === 'Z' || e.key === ' ')) {
+        launchGame();
+      }
+    });
+
+    prepareFiles().catch((err) => {
+      console.error(err);
+      statusEl.textContent = `Error: ${err.message}`;
+    });
+  </script>
+</body>
+</html>
