@@ -69,6 +69,7 @@
     const playBtn = document.getElementById('play-btn');
     const canvas = document.getElementById('canvas');
 
+    // All external Undertale .ogg music & sound tracks
     const OGG_FILES = [
       "abc_123_a.ogg", "mus_a2.ogg", "mus_afraid.ogg", "mus_alarms.ogg", "mus_alphys.ogg",
       "mus_amalgam.ogg", "mus_ambientwater.ogg", "mus_anothermedium.ogg", "mus_autogameover.ogg",
@@ -153,6 +154,47 @@
       );
     }
 
+    // Wire Butterscotch's exported _onKeyDown, _onKeyUp, and mouse callbacks directly!
+    function bindButterscotchInputs(instance) {
+      window.addEventListener('keydown', (e) => {
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
+          e.preventDefault();
+        }
+        if (typeof instance._onKeyDown === 'function') {
+          instance._onKeyDown(e.keyCode || e.which);
+        }
+      });
+
+      window.addEventListener('keyup', (e) => {
+        if (typeof instance._onKeyUp === 'function') {
+          instance._onKeyUp(e.keyCode || e.which);
+        }
+      });
+
+      canvas.addEventListener('mousemove', (e) => {
+        if (typeof instance._onMouseMove === 'function') {
+          const rect = canvas.getBoundingClientRect();
+          const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
+          const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
+          instance._onMouseMove(x, y);
+        }
+      });
+
+      canvas.addEventListener('mousedown', (e) => {
+        window.focus();
+        canvas.focus();
+        if (typeof instance._onMouseDown === 'function') {
+          instance._onMouseDown(e.button);
+        }
+      });
+
+      window.addEventListener('mouseup', (e) => {
+        if (typeof instance._onMouseUp === 'function') {
+          instance._onMouseUp(e.button);
+        }
+      });
+    }
+
     async function prepareFiles() {
       const opfsRoot = await navigator.storage.getDirectory();
       const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
@@ -167,50 +209,45 @@
       } catch {}
 
       if (!hasDataWin) {
-        setProgress(5, 'Downloading data.win...');
-        const res = await fetch('./game/data.win');
-        if (!res.ok) throw new Error(`Missing ./game/data.win (${res.status})`);
-        await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
-      }
-      done++;
-      setProgress((done / total) * 100, `Loaded data.win (${done}/${total})`);
-
-      const BATCH_SIZE = 20;
-      for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
-        const batch = OGG_FILES.slice(i, i + BATCH_SIZE);
-        await Promise.all(
-          batch.map(async (name) => {
-            let cached = false;
-            try {
-              const f = await (await gameDir.getFileHandle(name)).getFile();
-              if (f.size > 0) cached = true;
-            } catch {}
-
-            if (!cached) {
-              const res = await fetch(`./game/${name}`);
-              if (res.ok) {
-                await writeToOpfs(gameDir, name, new Uint8Array(await res.arrayBuffer()));
-              }
-            }
-            done++;
-            setProgress((done / total) * 100, `Downloading music & audio (${done}/${total})...`);
-          })
-        );
-      }
-
-      setProgress(100, 'All files ready!');
-      playBtn.style.display = 'inline-block';
-    }
-
-    let started = false;
-    async function launchGame() {
-      if (started) return;
-      started = true;
-      playBtn.style.display = 'none';
-      statusEl.textContent = 'Starting Undertale...';
-
-      try {
-        window.focus();
+setProgress(5, 'Downloading data.win...');
+const res = await fetch('./game/data.win');
+if (!res.ok) throw new Error(Missing ./game/data.win (${res.status}));
+await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
+}
+done++;
+setProgress((done / total) * 100, Loaded data.win (${done}/${total}));
+const BATCH_SIZE = 20;
+for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
+const batch = OGG_FILES.slice(i, i + BATCH_SIZE);
+await Promise.all(
+batch.map(async (name) => {
+let cached = false;
+try {
+const f = await (await gameDir.getFileHandle(name)).getFile();
+if (f.size > 0) cached = true;
+} catch {}
+if (!cached) {
+const res = await fetch(./game/${name});
+if (res.ok) {
+await writeToOpfs(gameDir, name, new Uint8Array(await res.arrayBuffer()));
+}
+}
+done++;
+setProgress((done / total) * 100, Downloading music & audio (${done}/${total})...);
+})
+);
+}
+setProgress(100, 'All files ready!');
+playBtn.style.display = 'inline-block';
+}
+let started = false;
+async function launchGame() {
+if (started) return;
+started = true;
+playBtn.style.display = 'none';
+statusEl.textContent = 'Starting Undertale...';
+try {
+window.focus();
 canvas.focus();
 const instance = await createButterscotch({
 canvas,
@@ -219,6 +256,8 @@ locateFile: (path) => ./${path}
 if (typeof instance._mountOpfs === 'function') {
 await instance._mountOpfs();
 }
+// Hook up Butterscotch's custom keyboard & mouse exports!
+bindButterscotchInputs(instance);
 overlayEl.style.display = 'none';
 window.focus();
 canvas.focus();
@@ -233,12 +272,6 @@ playBtn.addEventListener('click', launchGame);
 window.addEventListener('keydown', (e) => {
 if (!started && playBtn.style.display !== 'none' && (e.key === 'Enter' || e.key === 'z' || e.key === 'Z' || e.key === ' ')) {
 launchGame();
-}
-});
-window.addEventListener('pointerdown', () => {
-if (started) {
-window.focus();
-canvas.focus();
 }
 });
 prepareFiles().catch((err) => {
