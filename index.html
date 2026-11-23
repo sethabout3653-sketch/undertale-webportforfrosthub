@@ -68,7 +68,7 @@
       }
     }
 
-    // Resume WebAudio contexts whenever user clicks or presses a key
+    // Resume WebAudio contexts on user gesture so all music & SFX play
     function unlockAudio() {
       let anySuspended = false;
       try {
@@ -91,7 +91,6 @@
       }
     }
 
-    // Capture-phase listeners so SDL2 always receives Z, Enter, X, C, and Arrow keys
     window.addEventListener('keydown', (e) => {
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
         e.preventDefault();
@@ -100,9 +99,7 @@
       unlockAudio();
     }, true);
 
-    window.addEventListener('keyup', () => {
-      unlockAudio();
-    }, true);
+    window.addEventListener('keyup', unlockAudio, true);
 
     window.addEventListener('pointerdown', () => {
       focusGame();
@@ -116,7 +113,7 @@
       await writable.close();
     }
 
-    // Fixed GitHub API discovery ([0] indexing) + local files.json fallback
+    // Discover all .ogg files from local files.json or GitHub Contents API (with fixed [0] indexing)
     async function discoverOggFiles() {
       try {
         const localRes = await fetch('./game/files.json');
@@ -128,21 +125,18 @@
 
       try {
         const host = window.location.hostname;
-        if (host.endsWith('.github.io')) {
-          const owner = host.split('.')[0];
-          const pathParts = window.location.pathname.split('/').filter(Boolean);
-          if (pathParts.length > 0) {
-            const repo = pathParts[0];
-            const apiUrl = `https://github.com{owner}/${repo}/contents/game`;
-            const ghRes = await fetch(apiUrl);
-            if (ghRes.ok) {
-              const items = await ghRes.json();
-              if (Array.isArray(items)) {
-                return items
-                  .filter((item) => item.type === 'file' && item.name.toLowerCase().endsWith('.ogg'))
-                  .map((item) => item.name);
-              }
-            }
+        const owner = host.endsWith('.github.io') ? host.split('.')[0] : 'sethabout3653-sketch';
+        const pathParts = window.location.pathname.split('/').filter(Boolean);
+        const repo = pathParts.length > 0 ? pathParts[0] : 'undertale-webportforfrosthub';
+
+        const apiUrl = `https://github.com{owner}/${repo}/contents/game`;
+        const ghRes = await fetch(apiUrl);
+        if (ghRes.ok) {
+          const items = await ghRes.json();
+          if (Array.isArray(items)) {
+            return items
+              .filter((item) => item.type === 'file' && item.name.toLowerCase().endsWith('.ogg'))
+              .map((item) => item.name);
           }
         }
       } catch (e) {
@@ -223,11 +217,9 @@
         }
 
         setProgress(90, 'Starting WebAssembly...');
-        // Bind SDL2 keyboard listening directly to window so Z, Enter, X, C, Arrows always work
+        // Let Emscripten SDL2 bind keyboard events to document/canvas normally
         const instance = await createButterscotch({
           canvas,
-          keyboardListeningElement: window,
-          doNotCaptureKeyboard: false,
           locateFile: (path) => `./${path}`
         });
 
@@ -242,7 +234,6 @@
         soundHintEl.style.display = 'block';
         focusGame();
 
-        // Keep trying to unlock audio for the first few seconds after runner starts
         const unlockInterval = setInterval(unlockAudio, 500);
         setTimeout(() => clearInterval(unlockInterval), 10000);
 
