@@ -49,12 +49,12 @@
       await writable.close();
     }
 
-    // Build a real C (argc, argv) char** array in Wasm memory
+    // startRunner(argc, argv) reads argv[0] directly as the path to data.win!
     function callStartRunnerWithArgs(instance, args) {
       const argvPtrs = args.map((str) => instance.stringToNewUTF8(str));
       const argvTable = new Uint32Array(argvPtrs.length + 1);
       argvPtrs.forEach((ptr, idx) => { argvTable[idx] = ptr; });
-      argvTable[argvPtrs.length] = 0; // NULL terminator
+      argvTable[argvPtrs.length] = 0;
 
       return instance.ccall(
         'startRunner',
@@ -77,7 +77,7 @@
         const total = 1 + oggFiles.length;
         let done = 0;
 
-        // Write files into OPFS
+        // Write files into OPFS (which mounts at /butterscotch in WasmFS!)
         const opfsRoot = await navigator.storage.getDirectory();
         const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
 
@@ -86,7 +86,6 @@
         if (!dataRes.ok) throw new Error(`Failed to load ./game/data.win (${dataRes.status})`);
         const dataBytes = new Uint8Array(await dataRes.arrayBuffer());
 
-        await writeToOpfs(opfsRoot, 'data.win', dataBytes);
         await writeToOpfs(gameDir, 'data.win', dataBytes);
         done++;
         setProgress((done / total) * 85, `Loaded data.win (${done}/${total})`);
@@ -98,7 +97,6 @@
               const res = await fetch(`./game/${encodeURIComponent(name)}`);
               if (res.ok) {
                 const bytes = new Uint8Array(await res.arrayBuffer());
-                await writeToOpfs(opfsRoot, name, bytes);
                 await writeToOpfs(gameDir, name, bytes);
               }
               done++;
@@ -118,40 +116,16 @@
           await instance._mountOpfs();
         }
 
-        // Automatically find which root folder contains our mounted OPFS data.win
-        const rootEntries = instance.FS.readdir('/').filter(e => e !== '.' && e !== '..');
-        console.log('Root folders:', rootEntries);
+        // OPFS mounts at /butterscotch, so our folder is /butterscotch/game/data.win
+        const gameDataPath = '/butterscotch/game/data.win';
+        console.log('Launching Butterscotch with:', gameDataPath);
 
-        let resolvedDataWinPath = '/data.win';
-        for (const entry of rootEntries) {
-          const base = `/${entry}`;
-          try {
-            const sub = instance.FS.readdir(base);
-            if (sub.includes('game')) {
-              resolvedDataWinPath = `${base}/game/data.win`;
-              break;
-            }
-            if (sub.includes('data.win')) {
-              resolvedDataWinPath = `${base}/data.win`;
-              break;
-            }
-          } catch {}
-        }
-
-        // Fallback: also write directly into in-memory WasmFS if OPFS mount wasn't found
-        if (resolvedDataWinPath === '/data.win') {
-          try { instance.FS.mkdir('/game'); } catch {}
-          instance.FS.writeFile('/game/data.win', dataBytes);
-          resolvedDataWinPath = '/game/data.win';
-        }
-
-        console.log('Launching Butterscotch with:', resolvedDataWinPath);
         setProgress(98, 'Launching Undertale...');
         loaderEl.style.display = 'none';
         canvas.focus();
 
-        // Pass real (argc, argv) = ["butterscotch.wasm", "<path to data.win>"]
-        await callStartRunnerWithArgs(instance, ['butterscotch.wasm', resolvedDataWinPath]);
+        // Pass ['/butterscotch/game/data.win'] as argv[0]!
+        await callStartRunnerWithArgs(instance, [gameDataPath]);
       } catch (err) {
         console.error(err);
         loaderEl.style.display = 'block';
