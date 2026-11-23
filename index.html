@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Undertale</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      color: #fff;
+      font-family: monospace;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    #loader {
+      position: absolute;
+      text-align: center;
+      z-index: 10;
+    }
+    #bar {
+      width: 280px;
+      height: 12px;
+      border: 2px solid #fff;
+      margin-top: 10px;
+      padding: 2px;
+    }
+    #fill {
+      width: 0%;
+      height: 100%;
+      background: #fff;
+      transition: width 0.1s linear;
+    }
+    canvas#canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+  <div id="loader">
+    <div id="status">Starting Butterscotch...</div>
+    <div id="bar"><div id="fill"></div></div>
+  </div>
+
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+
+  <script type="module">
+    import createButterscotch from './butterscotch.mjs';
+
+    const statusEl = document.getElementById('status');
+    const fillEl = document.getElementById('fill');
+    const loaderEl = document.getElementById('loader');
+    const canvas = document.getElementById('canvas');
+
+    function setProgress(pct, msg) {
+      fillEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+      if (msg) statusEl.textContent = msg;
+    }
+
+    async function writeToOpfs(dirHandle, fileName, arrayBuffer) {
+      const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(arrayBuffer);
+      await writable.close();
+    }
+
+    async function boot() {
+      try {
+        // 1. Check for optional audio list (game/files.json)
+        setProgress(5, 'Checking game files...');
+        let oggFiles = [];
+        try {
+          const listRes = await fetch('./game/files.json');
+          if (listRes.ok) oggFiles = await listRes.json();
+        } catch {}
+
+        const total = 1 + oggFiles.length;
+        let done = 0;
+
+        // 2. Write data.win & .ogg files into OPFS (used by Butterscotch WasmFS)
+        const opfsRoot = await navigator.storage.getDirectory();
+        const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
+
+        setProgress(10, 'Loading data.win...');
+        const dataRes = await fetch('./game/data.win');
+        if (!dataRes.ok) throw new Error(`Missing ./game/data.win (${dataRes.status})`);
+        const dataBytes = new Uint8Array(await dataRes.arrayBuffer());
+
+        await writeToOpfs(opfsRoot, 'data.win', dataBytes);
+        await writeToOpfs(gameDir, 'data.win', dataBytes);
+        done++;
+        setProgress((done / total) * 85, `Loaded data.win (${done}/${total})`);
+
+        for (let i = 0; i < oggFiles.length; i += 10) {
+          const batch = oggFiles.slice(i, i + 10);
+          await Promise.all(
+            batch.map(async (name) => {
+              const res = await fetch(`./game/${encodeURIComponent(name)}`);
+              if (res.ok) {
+                const bytes = new Uint8Array(await res.arrayBuffer());
+                await writeToOpfs(opfsRoot, name, bytes);
+                await writeToOpfs(gameDir, name, bytes);
+              }
+              done++;
+              setProgress((done / total) * 85, `Loading audio (${done}/${total})...`);
+            })
+          );
+        }
+
+        // 3. Initialize butterscotch.mjs + butterscotch.wasm
+        setProgress(90, 'Booting WebAssembly...');
+        const instance = await createButterscotch({
+          canvas,
+          locateFile: (path) => `./${path}`,
+          arguments: ['/data.win'],
+          noInitialRun: true
+        });
+
+        // Also mirror files into Emscripten FS in case memory FS is checked first
+        try { instance.FS.mkdir('/game'); } catch {}
+        try {
+          instance.FS.writeFile('/data.win', dataBytes);
+          instance.FS.writeFile('/game/data.win', dataBytes);
+        } catch {}
+
+        // 4. Mount OPFS & trigger Butterscotch's exported entry points
+        if (instance._mountOpfs) await instance._mountOpfs();
+        if (instance.ccall) {
+          try { await instance.ccall('mountOpfs', 'void', [], [], { async: true }); } catch {}
+          try { await instance.ccall('startRunner', 'void', ['string'], ['/data.win'], { async: true }); } catch {}
+        }
+        if (instance.callMain) {
+          try { instance.callMain(['/data.win']); } catch {}
+        }
+
+        setProgress(100, 'Ready!');
+        loaderEl.style.display = 'none';
+        canvas.focus();
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    window.addEventListener('click', () => canvas.focus());
+    boot();
+  </script>
+</body>
+</html>
