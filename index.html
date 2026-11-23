@@ -43,7 +43,7 @@
     <div id="bar"><div id="fill"></div></div>
   </div>
 
-  <div id="sound-hint" style="display:none;">Click or press Z / Enter to enable sound</div>
+  <div id="sound-hint" style="display:none;">Click canvas or press Z / Enter to enable sound</div>
 
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
 
@@ -91,6 +91,12 @@
       }
     }
 
+    // Keep canvas focused and unlock audio on any click or keypress
+    window.addEventListener('pointerdown', () => {
+      focusGame();
+      unlockAudio();
+    }, true);
+
     window.addEventListener('keydown', (e) => {
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
         e.preventDefault();
@@ -101,11 +107,6 @@
 
     window.addEventListener('keyup', unlockAudio, true);
 
-    window.addEventListener('pointerdown', () => {
-      focusGame();
-      unlockAudio();
-    }, true);
-
     async function writeToOpfs(dirHandle, fileName, bytes) {
       const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
       const writable = await fileHandle.createWritable();
@@ -113,7 +114,7 @@
       await writable.close();
     }
 
-    // Discover all .ogg files from local files.json or GitHub Contents API (with fixed [0] indexing)
+    // Fetch list of all .ogg files in game/ from local files.json or GitHub API
     async function discoverOggFiles() {
       try {
         const localRes = await fetch('./game/files.json');
@@ -130,6 +131,7 @@
         const repo = pathParts.length > 0 ? pathParts[0] : 'undertale-webportforfrosthub';
 
         const apiUrl = `https://github.com{owner}/${repo}/contents/game`;
+        console.log('Fetching audio list from:', apiUrl);
         const ghRes = await fetch(apiUrl);
         if (ghRes.ok) {
           const items = await ghRes.json();
@@ -163,6 +165,7 @@
 
     async function boot() {
       try {
+        focusGame();
         setProgress(3, 'Finding game & audio files...');
         const oggFiles = await discoverOggFiles();
         console.log(`Discovered ${oggFiles.length} .ogg music/sound files`);
@@ -217,9 +220,14 @@
         }
 
         setProgress(90, 'Starting WebAssembly...');
-        // Let Emscripten SDL2 bind keyboard events to document/canvas normally
+        focusGame();
+
+        // Pass canvas with ID #canvas so Emscripten SDL2 hooks keyboard & mouse events properly
         const instance = await createButterscotch({
-          canvas,
+          canvas: (() => {
+            canvas.id = 'canvas';
+            return canvas;
+          })(),
           locateFile: (path) => `./${path}`
         });
 
@@ -234,8 +242,8 @@
         soundHintEl.style.display = 'block';
         focusGame();
 
-        const unlockInterval = setInterval(unlockAudio, 500);
-        setTimeout(() => clearInterval(unlockInterval), 10000);
+        const unlockInterval = setInterval(unlockAudio, 400);
+        setTimeout(() => clearInterval(unlockInterval), 12000);
 
         await callStartRunnerWithArgs(instance, [gameDataPath]);
       } catch (err) {
