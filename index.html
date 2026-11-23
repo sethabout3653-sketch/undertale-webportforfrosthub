@@ -69,7 +69,6 @@
     const playBtn = document.getElementById('play-btn');
     const canvas = document.getElementById('canvas');
 
-    // All external Undertale .ogg music & sound tracks
     const OGG_FILES = [
       "abc_123_a.ogg", "mus_a2.ogg", "mus_afraid.ogg", "mus_alarms.ogg", "mus_alphys.ogg",
       "mus_amalgam.ogg", "mus_ambientwater.ogg", "mus_anothermedium.ogg", "mus_autogameover.ogg",
@@ -154,7 +153,6 @@
       );
     }
 
-    // Wire Butterscotch's exported _onKeyDown, _onKeyUp, and mouse callbacks directly!
     function bindButterscotchInputs(instance) {
       window.addEventListener('keydown', (e) => {
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
@@ -209,8 +207,9 @@
       } catch {}
 
       if (!hasDataWin) {
-setProgress(5, 'Downloading data.win...');
-const res = await fetch('./game/data.win');
+        setProgress(5, 'Downloading data.win...');
+        const res = await fetch('./game/data.win');
+
 if (!res.ok) throw new Error(Missing ./game/data.win (${res.status}));
 await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
 }
@@ -256,7 +255,6 @@ locateFile: (path) => ./${path}
 if (typeof instance._mountOpfs === 'function') {
 await instance._mountOpfs();
 }
-// Hook up Butterscotch's custom keyboard & mouse exports!
 bindButterscotchInputs(instance);
 overlayEl.style.display = 'none';
 window.focus();
