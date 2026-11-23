@@ -150,18 +150,37 @@
     }
   </style>
 
-  <!-- Track AudioContext instances created by the engine and resume suspended ones on user input -->
+  <!-- Track AudioContext instances, keep them warm when allowed, and resume immediately on gesture -->
   <script>
-    (function setupAudioContextTracker() {
+    (function setupLowLatencyAudio() {
       const trackedContexts = new Set();
       const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
+
+      function tryResumeContext(ctx) {
+        if (ctx && ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+          ctx.resume().catch(() => {});
+        }
+      }
 
       if (NativeAudioContext) {
         const WrappedAudioContext = function (...args) {
           const ctx = new NativeAudioContext(...args);
           trackedContexts.add(ctx);
+
+          // Attempt immediate resume on creation so the audio graph is warm when permitted
+          tryResumeContext(ctx);
+
+          if (typeof ctx.addEventListener === 'function') {
+            ctx.addEventListener('statechange', () => {
+              if (ctx.state === 'suspended') {
+                tryResumeContext(ctx);
+              }
+            });
+          }
+
           return ctx;
         };
+
         WrappedAudioContext.prototype = NativeAudioContext.prototype;
         Object.setPrototypeOf(WrappedAudioContext, NativeAudioContext);
         window.AudioContext = WrappedAudioContext;
@@ -170,29 +189,34 @@
         }
       }
 
-      function resumeSuspendedContexts() {
-        trackedContexts.forEach((ctx) => {
-          if (ctx && ctx.state === 'suspended') {
-            ctx.resume().catch(() => {});
-          }
-        });
+      function resumeAllAudio() {
+        trackedContexts.forEach(tryResumeContext);
 
-        if (window.SDL2 && window.SDL2.audioContext && window.SDL2.audioContext.state === 'suspended') {
-          window.SDL2.audioContext.resume().catch(() => {});
+        if (window.SDL2 && window.SDL2.audioContext) {
+          tryResumeContext(window.SDL2.audioContext);
         }
         if (window.AL && window.AL.contexts) {
           Object.values(window.AL.contexts).forEach((alCtx) => {
-            if (alCtx && alCtx.audioCtx && alCtx.audioCtx.state === 'suspended') {
-              alCtx.audioCtx.resume().catch(() => {});
+            if (alCtx && alCtx.audioCtx) {
+              tryResumeContext(alCtx.audioCtx);
             }
           });
         }
       }
 
-      window.__resumeGameAudio = resumeSuspendedContexts;
+      window.__resumeGameAudio = resumeAllAudio;
 
-      ['keydown', 'pointerdown', 'mousedown', 'touchstart'].forEach((evt) => {
-        window.addEventListener(evt, resumeSuspendedContexts, { capture: true, passive: true });
+      // Capture phase ensures resume runs before game input handlers process the event
+      ['keydown', 'pointerdown', 'mousedown', 'touchstart', 'click'].forEach((evt) => {
+        window.addEventListener(evt, resumeAllAudio, { capture: true, passive: true });
+      });
+
+      // Also attempt when page becomes visible or gains focus
+      window.addEventListener('focus', resumeAllAudio, { passive: true });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          resumeAllAudio();
+        }
       });
     })();
   </script>
