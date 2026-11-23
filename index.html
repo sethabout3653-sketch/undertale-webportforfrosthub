@@ -149,6 +149,53 @@
       outline: none;
     }
   </style>
+
+  <!-- Track AudioContext instances created by the engine and resume suspended ones on user input -->
+  <script>
+    (function setupAudioContextTracker() {
+      const trackedContexts = new Set();
+      const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
+
+      if (NativeAudioContext) {
+        const WrappedAudioContext = function (...args) {
+          const ctx = new NativeAudioContext(...args);
+          trackedContexts.add(ctx);
+          return ctx;
+        };
+        WrappedAudioContext.prototype = NativeAudioContext.prototype;
+        Object.setPrototypeOf(WrappedAudioContext, NativeAudioContext);
+        window.AudioContext = WrappedAudioContext;
+        if (window.webkitAudioContext) {
+          window.webkitAudioContext = WrappedAudioContext;
+        }
+      }
+
+      function resumeSuspendedContexts() {
+        trackedContexts.forEach((ctx) => {
+          if (ctx && ctx.state === 'suspended') {
+            ctx.resume().catch(() => {});
+          }
+        });
+
+        if (window.SDL2 && window.SDL2.audioContext && window.SDL2.audioContext.state === 'suspended') {
+          window.SDL2.audioContext.resume().catch(() => {});
+        }
+        if (window.AL && window.AL.contexts) {
+          Object.values(window.AL.contexts).forEach((alCtx) => {
+            if (alCtx && alCtx.audioCtx && alCtx.audioCtx.state === 'suspended') {
+              alCtx.audioCtx.resume().catch(() => {});
+            }
+          });
+        }
+      }
+
+      window.__resumeGameAudio = resumeSuspendedContexts;
+
+      ['keydown', 'pointerdown', 'mousedown', 'touchstart'].forEach((evt) => {
+        window.addEventListener(evt, resumeSuspendedContexts, { capture: true, passive: true });
+      });
+    })();
+  </script>
 </head>
 <body>
   <div id="overlay">
@@ -285,6 +332,7 @@
 
     function bindButterscotchInputs(instance) {
       window.addEventListener('keydown', (e) => {
+        if (window.__resumeGameAudio) window.__resumeGameAudio();
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
           e.preventDefault();
         }
@@ -309,6 +357,7 @@
       });
 
       canvas.addEventListener('mousedown', (e) => {
+        if (window.__resumeGameAudio) window.__resumeGameAudio();
         window.focus();
         canvas.focus();
         if (typeof instance._onMouseDown === 'function') {
