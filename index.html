@@ -1,493 +1,163 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Undertale</title>
-  <style>
-    *, *::before, *::after {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
 
-    html, body {
-      width: 100%;
-      height: 100%;
-      background: #000;
-      color: #fff;
-      font-family: 'Courier New', Courier, monospace;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-      user-select: none;
-    }
+<script>
+(function setupLowLatencyAudio() {
+  const trackedContexts = new Set();
+  const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
 
-    #overlay {
-      position: absolute;
-      inset: 0;
-      background: #000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 10;
-      padding: 20px;
-      transition: opacity 0.35s ease;
-    }
+  let audioUnlocked = false;
+  let resumePending = false;
 
-    #overlay.fade-out {
-      opacity: 0;
-      pointer-events: none;
-    }
+  function trackContext(ctx) {
+    if (!ctx || trackedContexts.has(ctx)) return;
 
-    /* Classic Undertale Dialogue Box */
-    .ut-box {
-      width: 100%;
-      max-width: 540px;
-      border: 4px solid #fff;
-      background: #000;
-      padding: 28px 32px;
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      box-shadow: 0 0 0 4px #000;
-    }
+    trackedContexts.add(ctx);
 
-    .ut-header {
-      display: flex;
-      align-items: center;
-      gap: 18px;
-    }
-
-    /* Pixel Soul Heart */
-    .soul-heart {
-      width: 24px;
-      height: 24px;
-      flex-shrink: 0;
-      animation: pulse 1.2s infinite ease-in-out;
-    }
-
-    @keyframes pulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.12); }
-    }
-
-    .ut-text-group {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      text-align: left;
-      flex: 1;
-    }
-
-    #status {
-      font-size: 18px;
-      font-weight: bold;
-      letter-spacing: 0.5px;
-      line-height: 1.4;
-      color: #fff;
-    }
-
-    #sub-status {
-      font-size: 14px;
-      color: #aaa;
-    }
-
-    /* Undertale HP-style Loading Bar */
-    .bar-row {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
-
-    .bar-label {
-      font-size: 14px;
-      font-weight: bold;
-      color: #ffff00;
-      letter-spacing: 1px;
-    }
-
-    #bar {
-      flex: 1;
-      height: 22px;
-      background: #660000;
-      border: 2px solid #fff;
-      position: relative;
-      overflow: hidden;
-    }
-
-    #fill {
-      width: 0%;
-      height: 100%;
-      background: #ffff00;
-      transition: width 0.12s ease-out;
-    }
-
-    #pct {
-      font-size: 15px;
-      font-weight: bold;
-      min-width: 48px;
-      text-align: right;
-      color: #fff;
-    }
-
-    .error-state #status {
-      color: #ff4444;
-    }
-
-    .error-state .soul-heart path {
-      fill: #555;
-    }
-
-    canvas#canvas {
-      display: block;
-      width: 100vw;
-      height: 100vh;
-      object-fit: contain;
-      image-rendering: pixelated;
-      outline: none;
-    }
-  </style>
-
-  <!-- Track AudioContext instances, keep them warm when allowed, and resume immediately on gesture -->
-  <script>
-    (function setupLowLatencyAudio() {
-      const trackedContexts = new Set();
-      const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
-
-      function tryResumeContext(ctx) {
-        if (ctx && ctx.state === 'suspended' && typeof ctx.resume === 'function') {
-          ctx.resume().catch(() => {});
+    if (ctx.addEventListener) {
+      ctx.addEventListener('statechange', () => {
+        if (audioUnlocked && ctx.state === 'suspended') {
+          resumeContext(ctx);
         }
-      }
-
-      if (NativeAudioContext) {
-        const WrappedAudioContext = function (...args) {
-          const ctx = new NativeAudioContext(...args);
-          trackedContexts.add(ctx);
-
-          // Attempt immediate resume on creation so the audio graph is warm when permitted
-          tryResumeContext(ctx);
-
-          if (typeof ctx.addEventListener === 'function') {
-            ctx.addEventListener('statechange', () => {
-              if (ctx.state === 'suspended') {
-                tryResumeContext(ctx);
-              }
-            });
-          }
-
-          return ctx;
-        };
-
-        WrappedAudioContext.prototype = NativeAudioContext.prototype;
-        Object.setPrototypeOf(WrappedAudioContext, NativeAudioContext);
-        window.AudioContext = WrappedAudioContext;
-        if (window.webkitAudioContext) {
-          window.webkitAudioContext = WrappedAudioContext;
-        }
-      }
-
-      function resumeAllAudio() {
-        trackedContexts.forEach(tryResumeContext);
-
-        if (window.SDL2 && window.SDL2.audioContext) {
-          tryResumeContext(window.SDL2.audioContext);
-        }
-        if (window.AL && window.AL.contexts) {
-          Object.values(window.AL.contexts).forEach((alCtx) => {
-            if (alCtx && alCtx.audioCtx) {
-              tryResumeContext(alCtx.audioCtx);
-            }
-          });
-        }
-      }
-
-      window.__resumeGameAudio = resumeAllAudio;
-
-      // Capture phase ensures resume runs before game input handlers process the event
-      ['keydown', 'pointerdown', 'mousedown', 'touchstart', 'click'].forEach((evt) => {
-        window.addEventListener(evt, resumeAllAudio, { capture: true, passive: true });
       });
+    }
 
-      // Also attempt when page becomes visible or gains focus
-      window.addEventListener('focus', resumeAllAudio, { passive: true });
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
+    if (audioUnlocked) {
+      resumeContext(ctx);
+    }
+  }
+
+  function resumeContext(ctx) {
+    if (!ctx || ctx.state === 'closed') return;
+
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      try {
+        const result = ctx.resume();
+
+        if (result && typeof result.catch === 'function') {
+          result.catch(() => {});
+        }
+      } catch (_) {}
+    }
+  }
+
+  if (NativeAudioContext) {
+    const WrappedAudioContext = function (...args) {
+      const ctx = new NativeAudioContext(...args);
+      trackContext(ctx);
+
+      if (audioUnlocked) {
+        resumeContext(ctx);
+      }
+
+      return ctx;
+    };
+
+    WrappedAudioContext.prototype = NativeAudioContext.prototype;
+    Object.setPrototypeOf(WrappedAudioContext, NativeAudioContext);
+
+    window.AudioContext = WrappedAudioContext;
+
+    if (window.webkitAudioContext) {
+      window.webkitAudioContext = WrappedAudioContext;
+    }
+  }
+
+  function discoverAudioContexts() {
+    if (window.SDL2 && window.SDL2.audioContext) {
+      trackContext(window.SDL2.audioContext);
+    }
+
+    if (window.AL && window.AL.contexts) {
+      Object.values(window.AL.contexts).forEach((alCtx) => {
+        if (alCtx && alCtx.audioCtx) {
+          trackContext(alCtx.audioCtx);
+        }
+      });
+    }
+  }
+
+  function resumeAllAudio() {
+    discoverAudioContexts();
+
+    trackedContexts.forEach(resumeContext);
+
+    if (window.SDL2 && window.SDL2.audioContext) {
+      resumeContext(window.SDL2.audioContext);
+    }
+
+    if (window.AL && window.AL.contexts) {
+      Object.values(window.AL.contexts).forEach((alCtx) => {
+        if (alCtx && alCtx.audioCtx) {
+          resumeContext(alCtx.audioCtx);
+        }
+      });
+    }
+  }
+
+  function unlockAudio(event) {
+    if (event && event.isTrusted === false) return;
+
+    audioUnlocked = true;
+
+    resumeAllAudio();
+
+    // Retry after other game input handlers have initialized audio.
+    if (!resumePending) {
+      resumePending = true;
+
+      Promise.resolve().then(() => {
+        resumeAllAudio();
+
+        requestAnimationFrame(() => {
           resumeAllAudio();
-        }
-      });
-    })();
-  </script>
-</head>
-<body>
-  <div id="overlay">
-    <div class="ut-box" id="ut-box">
-      <div class="ut-header">
-        <!-- 16x16 Pixel Art Red Heart -->
-        <svg class="soul-heart" viewBox="0 0 16 16" shape-rendering="crispEdges">
-          <path fill="#ff0000" d="
-            M2,1 h3 v1 h1 v1 h1 v1 h2 v-1 h1 v-1 h1 v-1 h3 v1 h1 v5 h-1 v2 h-1 v2 h-2 v2 h-2 v2 h-1 v1 h-2 v-1 h-1 v-2 h-2 v-2 h-2 v-2 h-1 v-2 h-1 v-5 h1 z
-          "/>
-        </svg>
-        <div class="ut-text-group">
-          <div id="status">* Preparing game files...</div>
-          <div id="sub-status">Checking local cache...</div>
-        </div>
-      </div>
-
-      <div class="bar-row">
-        <span class="bar-label">LOAD</span>
-        <div id="bar"><div id="fill"></div></div>
-        <span id="pct">0%</span>
-      </div>
-    </div>
-  </div>
-
-  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
-
-  <script type="module">
-    import createButterscotch from './butterscotch.mjs';
-
-    const overlayEl = document.getElementById('overlay');
-    const utBoxEl = document.getElementById('ut-box');
-    const statusEl = document.getElementById('status');
-    const subStatusEl = document.getElementById('sub-status');
-    const fillEl = document.getElementById('fill');
-    const pctEl = document.getElementById('pct');
-    const canvas = document.getElementById('canvas');
-
-    const OGG_FILES = [
-      "abc_123_a.ogg", "mus_a2.ogg", "mus_afraid.ogg", "mus_alarms.ogg", "mus_alphys.ogg",
-      "mus_amalgam.ogg", "mus_ambientwater.ogg", "mus_anothermedium.ogg", "mus_autogameover.ogg",
-      "mus_bad.ogg", "mus_barrier.ogg", "mus_battle1.ogg", "mus_battle2.ogg", "mus_berdly_battle.ogg",
-      "mus_bergentruckung.ogg", "mus_bgflameA.ogg", "mus_birdnoise.ogg", "mus_birdsong.ogg",
-      "mus_boss1.ogg", "mus_cast_1.ogg", "mus_cast_2.ogg", "mus_cast_3.ogg", "mus_cast_4.ogg",
-      "mus_cast_5.ogg", "mus_cast_6.ogg", "mus_cast_7.ogg", "mus_chime.ogg", "mus_churchbell.ogg",
-      "mus_computer.ogg", "mus_confession.ogg", "mus_coolbeat.ogg", "mus_core.ogg",
-      "mus_core_ambience.ogg", "mus_coretransition.ogg", "mus_creepy_ambience.ogg", "mus_crickets.ogg",
-      "mus_cymbal.ogg", "mus_dance_of_dog.ogg", "mus_date.ogg", "mus_date_fight.ogg",
-      "mus_date_tense.ogg", "mus_deeploop2.ogg", "mus_disturbing.ogg", "mus_dogappear.ogg",
-      "mus_dogmeows.ogg", "mus_dogroom.ogg", "mus_dogshrine_1.ogg", "mus_dogshrine_2.ogg",
-      "mus_dogsong.ogg", "mus_dontgiveup.ogg", "mus_doorclose.ogg", "mus_dooropen.ogg",
-      "mus_dununnn.ogg", "mus_elevator.ogg", "mus_elevator_last.ogg", "mus_endarea_parta.ogg",
-      "mus_endarea_partb.ogg", "mus_endingexcerpt1.ogg", "mus_endingexcerpt2.ogg", "mus_express_myself.ogg",
-      "mus_fallendown2.ogg", "mus_fearsting.ogg", "mus_flowey.ogg", "mus_f_6s_1.ogg",
-      "mus_f_6s_2.ogg", "mus_f_6s_3.ogg", "mus_f_6s_4.ogg", "mus_f_6s_5.ogg", "mus_f_6s_6.ogg",
-      "mus_f_alarm.ogg", "mus_f_destroyed.ogg", "mus_f_destroyed2.ogg", "mus_f_destroyed3.ogg",
-      "mus_f_finale_1.ogg", "mus_f_finale_1_l.ogg", "mus_f_finale_2.ogg", "mus_f_finale_3.ogg",
-      "mus_f_intro.ogg", "mus_f_newlaugh.ogg", "mus_f_newlaugh_low.ogg", "mus_f_part1.ogg",
-      "mus_f_part2.ogg", "mus_f_part3.ogg", "mus_f_saved.ogg", "mus_f_wind1.ogg", "mus_f_wind2.ogg",
-      "mus_gameover.ogg", "mus_ghostbattle.ogg", "mus_grandpasemi.ogg", "mus_hereweare.ogg",
-      "mus_hotel.ogg", "mus_hotel_battle.ogg", "mus_house1.ogg", "mus_house2.ogg",
-      "mus_intronoise.ogg", "mus_kingdescription.ogg", "mus_lab.ogg", "mus_leave.ogg",
-      "mus_menu0.ogg", "mus_menu1.ogg", "mus_menu2.ogg", "mus_menu3.ogg", "mus_menu4.ogg",
-      "mus_menu5.ogg", "mus_menu6.ogg", "mus_mettaton_ex.ogg", "mus_mettaton_neo.ogg",
-      "mus_mettaton_pretransform.ogg", "mus_mettmusical1.ogg", "mus_mettmusical2.ogg",
-      "mus_mettmusical3.ogg", "mus_mettmusical4.ogg", "mus_mettsad.ogg", "mus_mettshow.ogg",
-      "mus_mode.ogg", "mus_mtgameshow.ogg", "mus_muffet.ogg", "mus_muscle.ogg",
-      "mus_musicbox.ogg", "mus_myemeow.ogg", "mus_mysteriousroom2.ogg", "mus_mystery.ogg",
-      "mus_napstachords.ogg", "mus_napstahouse.ogg", "mus_news.ogg", "mus_news_battle.ogg",
-      "mus_ohyes.ogg", "mus_onceuponatime.ogg", "mus_oo.ogg", "mus_opera.ogg", "mus_operahouse.ogg",
-      "mus_options_fall.ogg", "mus_options_summer.ogg", "mus_options_winter.ogg", "mus_papyrus.ogg",
-      "mus_papyrusboss.ogg", "mus_piano.ogg", "mus_prebattle1.ogg", "mus_predummy.ogg",
-      "mus_race.ogg", "mus_rain.ogg", "mus_rain_deep.ogg", "mus_repeat_1.ogg", "mus_repeat_2.ogg",
-      "mus_reunited.ogg", "mus_rimshot.ogg", "mus_ruins.ogg", "mus_ruinspiano.ogg",
-      "mus_sans.ogg", "mus_sansdate.ogg", "mus_sfx_a_bullet.ogg", "mus_sfx_a_grab.ogg",
-      "mus_sfx_a_litbullet.ogg", "mus_sfx_a_pullback.ogg", "mus_sfx_a_target.ogg",
-      "mus_sfx_chainsaw.ogg", "mus_sfx_colorsparkle.ogg", "mus_sfx_generate.ogg",
-      "mus_sfx_hypergoner_charge.ogg", "mus_sfx_hypergoner_laugh.ogg", "mus_sfx_rainbowbeam_hold.ogg",
-      "mus_sfx_star.ogg", "mus_shop.ogg", "mus_sigh_of_dog.ogg", "mus_smallshock.ogg",
-      "mus_smile.ogg", "mus_snoresymphony.ogg", "mus_snowwalk.ogg", "mus_snowy.ogg",
-      "mus_spoopy.ogg", "mus_spoopy_holiday.ogg", "mus_spoopy_wave.ogg", "mus_star.ogg",
-      "mus_sticksnap.ogg", "mus_story.ogg", "mus_story_stuck.ogg", "mus_st_him.ogg",
-      "mus_st_meatfactory.ogg", "mus_st_troubledingle.ogg", "mus_temshop.ogg", "mus_temvillage.ogg",
-      "mus_tension.ogg", "mus_tone2.ogg", "mus_tone3.ogg", "mus_toomuch.ogg", "mus_toriel.ogg",
-      "mus_town.ogg", "mus_tv.ogg", "mus_undyneboss.ogg", "mus_undynefast.ogg", "mus_undynepiano.ogg",
-      "mus_undynetheme.ogg", "mus_undynetruetheme.ogg", "mus_vsasgore.ogg", "mus_waterfall.ogg",
-      "mus_waterquiet.ogg", "mus_wawa.ogg", "mus_whoopee.ogg", "mus_wind.ogg", "mus_woofenstein.ogg",
-      "mus_woofenstein_loop.ogg", "mus_wrongnumbersong.ogg", "mus_wrongworld.ogg", "mus_xpart.ogg",
-      "mus_xpart_2.ogg", "mus_xpart_a.ogg", "mus_xpart_b.ogg", "mus_xpart_back.ogg",
-      "mus_x_undyne.ogg", "mus_x_undyne_pre.ogg", "mus_yourbestfriend_3.ogg", "mus_zz_megalovania.ogg",
-      "mus_zzz_c.ogg", "mus_zzz_c2.ogg", "mus_z_ending.ogg", "snd_ballchime.ogg", "snd_curtains.ogg",
-      "snd_fall2.ogg", "snd_flameloop.ogg", "snd_f_destroyed.ogg", "snd_heavydamage.ogg",
-      "snd_jingle.ogg", "snd_mushroomdance.ogg", "snd_save.ogg", "snd_sonar.ogg"
-    ];
-
-    function setProgress(pct, msg, subMsg) {
-      const clamped = Math.min(100, Math.max(0, pct));
-      fillEl.style.width = `${clamped}%`;
-      pctEl.textContent = `${Math.round(clamped)}%`;
-      if (msg) statusEl.textContent = msg;
-      if (subMsg !== undefined) subStatusEl.textContent = subMsg;
-    }
-
-    function showError(err) {
-      console.error(err);
-      utBoxEl.classList.add('error-state');
-      overlayEl.classList.remove('fade-out');
-      overlayEl.style.display = 'flex';
-      statusEl.textContent = `* Error: ${err.message}`;
-      subStatusEl.textContent = 'Check the browser console or refresh to try again.';
-    }
-
-    async function writeToOpfs(dirHandle, fileName, bytes) {
-      const fileHandle = await dirHandle.getFileHandle(fileName, { create: true });
-      const writable = await fileHandle.createWritable();
-      await writable.write(bytes);
-      await writable.close();
-    }
-
-    function callStartRunnerWithArgs(instance, args) {
-      const argvPtrs = args.map((str) => instance.stringToNewUTF8(str));
-      const argvTable = new Uint32Array(argvPtrs.length + 1);
-      argvPtrs.forEach((ptr, idx) => { argvTable[idx] = ptr; });
-      argvTable[argvPtrs.length] = 0;
-
-      return instance.ccall(
-        'startRunner',
-        'number',
-        ['number', 'array'],
-        [args.length, new Uint8Array(argvTable.buffer)],
-        { async: true }
-      );
-    }
-
-    function bindButterscotchInputs(instance) {
-      window.addEventListener('keydown', (e) => {
-        if (window.__resumeGameAudio) window.__resumeGameAudio();
-        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
-          e.preventDefault();
-        }
-        if (typeof instance._onKeyDown === 'function') {
-          instance._onKeyDown(e.keyCode || e.which);
-        }
-      });
-
-      window.addEventListener('keyup', (e) => {
-        if (typeof instance._onKeyUp === 'function') {
-          instance._onKeyUp(e.keyCode || e.which);
-        }
-      });
-
-      canvas.addEventListener('mousemove', (e) => {
-        if (typeof instance._onMouseMove === 'function') {
-          const rect = canvas.getBoundingClientRect();
-          const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
-          const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
-          instance._onMouseMove(x, y);
-        }
-      });
-
-      canvas.addEventListener('mousedown', (e) => {
-        if (window.__resumeGameAudio) window.__resumeGameAudio();
-        window.focus();
-        canvas.focus();
-        if (typeof instance._onMouseDown === 'function') {
-          instance._onMouseDown(e.button);
-        }
-      });
-
-      window.addEventListener('mouseup', (e) => {
-        if (typeof instance._onMouseUp === 'function') {
-          instance._onMouseUp(e.button);
-        }
-      });
-    }
-
-    async function prepareFiles() {
-      const opfsRoot = await navigator.storage.getDirectory();
-      const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
-
-      const total = 1 + OGG_FILES.length;
-      let done = 0;
-
-      let hasDataWin = false;
-      try {
-        const f = await (await gameDir.getFileHandle('data.win')).getFile();
-        if (f.size > 1000000) hasDataWin = true;
-      } catch {}
-
-      if (!hasDataWin) {
-        setProgress(2, '* Downloading core game data...', 'Fetching data.win');
-        const res = await fetch('./game/data.win');
-        if (!res.ok) throw new Error(`Missing ./game/data.win (${res.status})`);
-        await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
-      }
-
-      done++;
-      setProgress((done / total) * 100, '* Loading audio assets...', `File ${done} of ${total} (data.win ready)`);
-
-      const BATCH_SIZE = 20;
-      for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
-        const batch = OGG_FILES.slice(i, i + BATCH_SIZE);
-        await Promise.all(
-          batch.map(async (name) => {
-            let cached = false;
-            try {
-              const f = await (await gameDir.getFileHandle(name)).getFile();
-              if (f.size > 0) cached = true;
-            } catch {}
-
-            if (!cached) {
-              const res = await fetch(`./game/${name}`);
-              if (res.ok) {
-                await writeToOpfs(gameDir, name, new Uint8Array(await res.arrayBuffer()));
-              }
-            }
-
-            done++;
-            setProgress(
-              (done / total) * 100,
-              '* Loading audio assets...',
-              `File ${done} of ${total} (${name})`
-            );
-          })
-        );
-      }
-
-      setProgress(100, '* Launching Undertale...', 'Initializing engine...');
-    }
-
-    async function launchGame() {
-      try {
-        window.focus();
-        canvas.focus();
-
-        const instance = await createButterscotch({
-          canvas,
-          locateFile: (path) => `./${path}`
+          resumePending = false;
         });
-
-        if (typeof instance._mountOpfs === 'function') {
-          await instance._mountOpfs();
-        }
-
-        bindButterscotchInputs(instance);
-
-        overlayEl.classList.add('fade-out');
-        setTimeout(() => {
-          overlayEl.style.display = 'none';
-        }, 350);
-
-        window.focus();
-        canvas.focus();
-
-        await callStartRunnerWithArgs(instance, ['/butterscotch/game/data.win']);
-      } catch (err) {
-        showError(err);
-      }
+      });
     }
+  }
 
-    (async () => {
-      try {
-        await prepareFiles();
-        await launchGame();
-      } catch (err) {
-        showError(err);
-      }
-    })();
-  </script>
-</body>
-</html>
+  window.__resumeGameAudio = resumeAllAudio;
+  window.__unlockGameAudio = unlockAudio;
+
+  // Capture interactions anywhere in the page, before game input handlers.
+  const interactionEvents = [
+    'pointerdown',
+    'pointerup',
+    'mousedown',
+    'mouseup',
+    'touchstart',
+    'touchend',
+    'keydown',
+    'click'
+  ];
+
+  interactionEvents.forEach((eventName) => {
+    window.addEventListener(eventName, unlockAudio, {
+      capture: true,
+      passive: true
+    });
+  });
+
+  // Handle audio contexts initialized after the game starts.
+  const discoverInterval = window.setInterval(() => {
+    discoverAudioContexts();
+
+    if (audioUnlocked) {
+      resumeAllAudio();
+    }
+  }, 500);
+
+  window.addEventListener('focus', () => {
+    if (audioUnlocked) resumeAllAudio();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && audioUnlocked) {
+      resumeAllAudio();
+    }
+  });
+
+  window.addEventListener('pageshow', () => {
+    if (audioUnlocked) resumeAllAudio();
+  });
+})();
+</script>
