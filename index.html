@@ -335,6 +335,13 @@
       68: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 }
     };
 
+    function isBlockedKey(e) {
+      const code = e.code;
+      const key = (e.key || '').toLowerCase();
+      const keyCode = e.keyCode || e.which;
+      return code === 'KeyV' || code === 'KeyL' || key === 'v' || key === 'l' || keyCode === 86 || keyCode === 76;
+    }
+
     function getMappedArrow(e) {
       return WASD_TO_ARROW[e.code] || WASD_TO_ARROW[e.keyCode || e.which] || null;
     }
@@ -409,7 +416,23 @@
     function bindButterscotchInputs(instance) {
       const activeWasd = new Set();
 
+      ['keydown', 'keyup', 'keypress'].forEach((evtName) => {
+        window.addEventListener(evtName, (e) => {
+          if (isBlockedKey(e)) {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+          }
+        }, { capture: true });
+      });
+
       window.addEventListener('keydown', (e) => {
+        if (isBlockedKey(e)) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          return;
+        }
+
         if (window.__resumeGameAudio) window.__resumeGameAudio();
 
         if (e.__isMappedArrow) {
@@ -443,6 +466,12 @@
       }, { capture: true });
 
       window.addEventListener('keyup', (e) => {
+        if (isBlockedKey(e)) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          return;
+        }
+
         if (e.__isMappedArrow) {
           if (typeof instance._onKeyUp === 'function') {
             instance._onKeyUp(e.keyCode || e.which);
