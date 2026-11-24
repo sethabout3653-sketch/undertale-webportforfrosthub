@@ -16,128 +16,55 @@
       height: 100%;
       background: #000;
       color: #fff;
-      font-family: 'Courier New', Courier, monospace;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      font-family: monospace;
       overflow: hidden;
-      user-select: none;
     }
 
     #overlay {
-      position: absolute;
+      position: fixed;
       inset: 0;
       background: #000;
       display: flex;
+      flex-direction: column;
       align-items: center;
       justify-content: center;
+      gap: 12px;
       z-index: 10;
       padding: 20px;
-      transition: opacity 0.35s ease;
+      text-align: center;
     }
 
     #overlay.fade-out {
       opacity: 0;
       pointer-events: none;
-    }
-
-    /* Classic Undertale Dialogue Box */
-    .ut-box {
-      width: 100%;
-      max-width: 540px;
-      border: 4px solid #fff;
-      background: #000;
-      padding: 28px 32px;
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      box-shadow: 0 0 0 4px #000;
-    }
-
-    .ut-header {
-      display: flex;
-      align-items: center;
-      gap: 18px;
-    }
-
-    /* Pixel Soul Heart */
-    .soul-heart {
-      width: 24px;
-      height: 24px;
-      flex-shrink: 0;
-      animation: pulse 1.2s infinite ease-in-out;
-    }
-
-    @keyframes pulse {
-      0%, 100% { transform: scale(1); }
-      50% { transform: scale(1.12); }
-    }
-
-    .ut-text-group {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      text-align: left;
-      flex: 1;
+      transition: opacity 0.25s ease;
     }
 
     #status {
       font-size: 18px;
-      font-weight: bold;
-      letter-spacing: 0.5px;
-      line-height: 1.4;
-      color: #fff;
     }
 
     #sub-status {
-      font-size: 14px;
+      font-size: 13px;
       color: #aaa;
     }
 
-    /* Undertale HP-style Loading Bar */
-    .bar-row {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
-
-    .bar-label {
-      font-size: 14px;
-      font-weight: bold;
-      color: #ffff00;
-      letter-spacing: 1px;
-    }
-
     #bar {
-      flex: 1;
-      height: 22px;
-      background: #660000;
+      width: 300px;
+      max-width: 90vw;
+      height: 18px;
       border: 2px solid #fff;
-      position: relative;
-      overflow: hidden;
+      background: #000;
     }
 
     #fill {
       width: 0%;
       height: 100%;
-      background: #ffff00;
-      transition: width 0.08s linear;
+      background: #fff;
     }
 
     #pct {
-      font-size: 15px;
-      font-weight: bold;
-      min-width: 48px;
-      text-align: right;
-      color: #fff;
-    }
-
-    .error-state #status {
-      color: #ff4444;
-    }
-
-    .error-state .soul-heart path {
-      fill: #555;
+      font-size: 14px;
     }
 
     canvas#canvas {
@@ -150,7 +77,7 @@
     }
   </style>
 
-  <!-- Track AudioContext instances, gate game loop until unlocked by click, and keep running across tabs -->
+  <!-- Track AudioContext instances, gate game loop until unlocked by click, and pace background ticks at normal speed -->
   <script>
     (function setupAudioAndGate() {
       const trackedContexts = new Set();
@@ -227,91 +154,80 @@
 
       window.__resumeGameAudio = resumeAllAudio;
 
-      // Keep requestAnimationFrame firing smoothly even when on another tab without timer buildup
+      // Keep background tab ticks paced at a single normal ~60fps step (no bursts or double-firing)
       const origRequestAnimationFrame = window.requestAnimationFrame.bind(window);
-      const backgroundRafCallbacks = new Set();
-      let bgRafLoopActive = false;
-      let bgChannel = null;
+      const TARGET_FRAME_MS = 1000 / 60;
+      const MIN_FRAME_GAP_MS = 14;
+      let queuedBackgroundCb = null;
+      let bgTimerId = null;
+      let lastFrameTime = performance.now();
 
-      try {
-        bgChannel = new MessageChannel();
-        bgChannel.port1.onmessage = () => {
-          if (!document.hidden || backgroundRafCallbacks.size === 0) {
-            bgRafLoopActive = false;
-            return;
-          }
-          const now = performance.now();
-          const batch = Array.from(backgroundRafCallbacks);
-          backgroundRafCallbacks.clear();
-          for (const cb of batch) {
-            try {
-              cb(now);
-            } catch (e) {
-              console.error(e);
-            }
-          }
-          if (document.hidden && backgroundRafCallbacks.size > 0) {
-            setTimeout(() => {
-              if (document.hidden && backgroundRafCallbacks.size > 0) {
-                bgChannel.port2.postMessage(null);
-              } else {
-                bgRafLoopActive = false;
-              }
-            }, 16);
-          } else {
-            bgRafLoopActive = false;
-          }
-        };
-      } catch {}
+      function clearBackgroundTimer() {
+        if (bgTimerId !== null) {
+          clearTimeout(bgTimerId);
+          bgTimerId = null;
+        }
+      }
 
-      function scheduleBackgroundRaf() {
-        if (bgRafLoopActive) return;
-        bgRafLoopActive = true;
-        if (bgChannel) {
-          bgChannel.port2.postMessage(null);
-        } else {
-          setTimeout(() => {
-            bgRafLoopActive = false;
-            if (backgroundRafCallbacks.size === 0) return;
-            const now = performance.now();
-            const batch = Array.from(backgroundRafCallbacks);
-            backgroundRafCallbacks.clear();
-            for (const cb of batch) {
-              try {
-                cb(now);
-              } catch (e) {
-                console.error(e);
-              }
-            }
-            if (document.hidden && backgroundRafCallbacks.size > 0) {
-              scheduleBackgroundRaf();
-            }
-          }, 16);
+      function pumpBackgroundFrame() {
+        bgTimerId = null;
+        if (!queuedBackgroundCb) return;
+
+        const now = performance.now();
+        const elapsed = now - lastFrameTime;
+        if (elapsed < MIN_FRAME_GAP_MS) {
+          bgTimerId = setTimeout(pumpBackgroundFrame, Math.max(1, TARGET_FRAME_MS - elapsed));
+          return;
+        }
+
+        lastFrameTime = now;
+        const cb = queuedBackgroundCb;
+        queuedBackgroundCb = null;
+        try {
+          cb(now);
+        } catch (e) {
+          console.error(e);
+        }
+
+        if (queuedBackgroundCb && bgTimerId === null) {
+          bgTimerId = setTimeout(pumpBackgroundFrame, TARGET_FRAME_MS);
         }
       }
 
       window.requestAnimationFrame = function (cb) {
         if (document.hidden) {
-          backgroundRafCallbacks.add(cb);
-          scheduleBackgroundRaf();
+          queuedBackgroundCb = cb;
+          if (bgTimerId === null) {
+            const elapsed = performance.now() - lastFrameTime;
+            const delay = Math.max(0, TARGET_FRAME_MS - elapsed);
+            bgTimerId = setTimeout(pumpBackgroundFrame, delay);
+          }
           return 0;
         }
-        return origRequestAnimationFrame(cb);
+        clearBackgroundTimer();
+        queuedBackgroundCb = null;
+        return origRequestAnimationFrame((ts) => {
+          lastFrameTime = performance.now();
+          cb(ts);
+        });
       };
 
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden && backgroundRafCallbacks.size > 0) {
-          const now = performance.now();
-          const batch = Array.from(backgroundRafCallbacks);
-          backgroundRafCallbacks.clear();
-          for (const cb of batch) {
-            try {
-              cb(now);
-            } catch (e) {
-              console.error(e);
-            }
+        if (!document.hidden) {
+          clearBackgroundTimer();
+          if (queuedBackgroundCb) {
+            const cb = queuedBackgroundCb;
+            queuedBackgroundCb = null;
+            origRequestAnimationFrame((ts) => {
+              lastFrameTime = performance.now();
+              cb(ts);
+            });
           }
+        } else if (queuedBackgroundCb && bgTimerId === null) {
+          const elapsed = performance.now() - lastFrameTime;
+          bgTimerId = setTimeout(pumpBackgroundFrame, Math.max(0, TARGET_FRAME_MS - elapsed));
         }
+
         if (window.__audioUnlocked) {
           resumeAllAudio();
         }
@@ -332,26 +248,10 @@
 </head>
 <body>
   <div id="overlay">
-    <div class="ut-box" id="ut-box">
-      <div class="ut-header">
-        <!-- 16x16 Pixel Art Red Heart -->
-        <svg class="soul-heart" viewBox="0 0 16 16" shape-rendering="crispEdges">
-          <path fill="#ff0000" d="
-            M2,1 h3 v1 h1 v1 h1 v1 h2 v-1 h1 v-1 h1 v-1 h3 v1 h1 v5 h-1 v2 h-1 v2 h-2 v2 h-2 v2 h-1 v1 h-2 v-1 h-1 v-2 h-2 v-2 h-2 v-2 h-1 v-2 h-1 v-5 h1 z
-          "/>
-        </svg>
-        <div class="ut-text-group">
-          <div id="status">* Preparing game files...</div>
-          <div id="sub-status">Checking local cache...</div>
-        </div>
-      </div>
-
-      <div class="bar-row">
-        <span class="bar-label">LOAD</span>
-        <div id="bar"><div id="fill"></div></div>
-        <span id="pct">0%</span>
-      </div>
-    </div>
+    <div id="status">Loading...</div>
+    <div id="bar"><div id="fill"></div></div>
+    <div id="pct">0%</div>
+    <div id="sub-status">Checking files...</div>
   </div>
 
   <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0"></canvas>
@@ -360,7 +260,6 @@
     import createButterscotch from './butterscotch.mjs';
 
     const overlayEl = document.getElementById('overlay');
-    const utBoxEl = document.getElementById('ut-box');
     const statusEl = document.getElementById('status');
     const subStatusEl = document.getElementById('sub-status');
     const fillEl = document.getElementById('fill');
@@ -479,11 +378,10 @@
 
     function showError(err) {
       console.error(err);
-      utBoxEl.classList.add('error-state');
       overlayEl.classList.remove('fade-out');
       overlayEl.style.display = 'flex';
-      statusEl.textContent = `* Error: ${err.message}`;
-      subStatusEl.textContent = 'Check the browser console or refresh to try again.';
+      statusEl.textContent = `Error: ${err.message}`;
+      subStatusEl.textContent = 'Refresh to try again.';
     }
 
     async function writeToOpfs(dirHandle, fileName, bytes) {
@@ -624,14 +522,14 @@
       } catch {}
 
       if (!hasDataWin) {
-        setProgress(2, '* Downloading core game data...', 'Fetching data.win', true);
+        setProgress(2, 'Loading...', 'data.win', true);
         const res = await fetch('./game/data.win');
         if (!res.ok) throw new Error(`Missing ./game/data.win (${res.status})`);
         await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
       }
 
       done++;
-      setProgress((done / total) * 100, '* Loading audio assets...', `File ${done} of ${total} (data.win ready)`, true);
+      setProgress((done / total) * 100, 'Loading...', `${done} / ${total}`, true);
 
       const BATCH_SIZE = 32;
       for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
@@ -654,14 +552,14 @@
             done++;
             setProgress(
               (done / total) * 100,
-              '* Loading audio assets...',
-              `File ${done} of ${total} (${name})`
+              'Loading...',
+              `${done} / ${total}`
             );
           })
         );
       }
 
-      setProgress(100, '* Click anywhere to start with sound...', 'Paused until click', true);
+      setProgress(100, 'Click to start', 'Paused until click', true);
     }
 
     function waitForClickToStart() {
@@ -694,7 +592,7 @@
         overlayEl.classList.add('fade-out');
         setTimeout(() => {
           overlayEl.style.display = 'none';
-        }, 350);
+        }, 250);
 
         window.focus();
         canvas.focus();
