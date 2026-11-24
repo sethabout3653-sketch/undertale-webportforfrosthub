@@ -121,7 +121,7 @@
       width: 0%;
       height: 100%;
       background: #ffff00;
-      transition: width 0.12s ease-out;
+      transition: width 0.08s linear;
     }
 
     #pct {
@@ -150,16 +150,34 @@
     }
   </style>
 
-  <!-- Track AudioContext instances, keep them warm when allowed, and resume immediately on gesture -->
+  <!-- Track AudioContext instances, gate game loop until unlocked by click, and keep running across tabs -->
   <script>
-    (function setupLowLatencyAudio() {
+    (function setupAudioAndGate() {
       const trackedContexts = new Set();
       const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
 
-      function tryResumeContext(ctx) {
-        if (ctx && ctx.state === 'suspended' && typeof ctx.resume === 'function') {
-          ctx.resume().catch(() => {});
+      window.__audioUnlocked = false;
+      window.__waitingForClickStart = false;
+      window.__onClickToStart = null;
+
+      function isContextReady(ctx) {
+        return ctx && ctx.state === 'running';
+      }
+
+      function anyContextReady() {
+        if (trackedContexts.size === 0) return false;
+        for (const ctx of trackedContexts) {
+          if (isContextReady(ctx)) return true;
         }
+        return false;
+      }
+
+      function tryResumeContext(ctx) {
+        if (!ctx || typeof ctx.resume !== 'function') return Promise.resolve();
+        if (ctx.state === 'suspended') {
+          return ctx.resume().catch(() => {});
+        }
+        return Promise.resolve();
       }
 
       if (NativeAudioContext) {
@@ -167,13 +185,10 @@
           const ctx = new NativeAudioContext(...args);
           trackedContexts.add(ctx);
 
-          // Attempt immediate resume on creation so the audio graph is warm when permitted
-          tryResumeContext(ctx);
-
           if (typeof ctx.addEventListener === 'function') {
             ctx.addEventListener('statechange', () => {
-              if (ctx.state === 'suspended') {
-                tryResumeContext(ctx);
+              if (ctx.state === 'running') {
+                window.__audioUnlocked = true;
               }
             });
           }
@@ -189,43 +204,129 @@
         }
       }
 
-      function resumeAllAudio() {
-        trackedContexts.forEach(tryResumeContext);
+      async function resumeAllAudio() {
+        const promises = [];
+        trackedContexts.forEach((ctx) => promises.push(tryResumeContext(ctx)));
 
         if (window.SDL2 && window.SDL2.audioContext) {
-          tryResumeContext(window.SDL2.audioContext);
+          promises.push(tryResumeContext(window.SDL2.audioContext));
         }
         if (window.AL && window.AL.contexts) {
           Object.values(window.AL.contexts).forEach((alCtx) => {
             if (alCtx && alCtx.audioCtx) {
-              tryResumeContext(alCtx.audioCtx);
+              promises.push(tryResumeContext(alCtx.audioCtx));
             }
           });
+        }
+
+        await Promise.all(promises);
+        if (anyContextReady()) {
+          window.__audioUnlocked = true;
         }
       }
 
       window.__resumeGameAudio = resumeAllAudio;
 
-      // Capture phase ensures resume runs before game input handlers process the event
-      ['keydown', 'pointerdown', 'pointermove', 'mousedown', 'touchstart', 'click', 'wheel'].forEach((evt) => {
-        window.addEventListener(evt, resumeAllAudio, { capture: true, passive: true });
-        document.addEventListener(evt, resumeAllAudio, { capture: true, passive: true });
-      });
+      // Keep requestAnimationFrame firing smoothly even when on another tab without timer buildup
+      const origRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+      const backgroundRafCallbacks = new Set();
+      let bgRafLoopActive = false;
+      let bgChannel = null;
 
-      // Also attempt when page becomes visible or gains focus
-      window.addEventListener('focus', resumeAllAudio, { passive: true });
+      try {
+        bgChannel = new MessageChannel();
+        bgChannel.port1.onmessage = () => {
+          if (!document.hidden || backgroundRafCallbacks.size === 0) {
+            bgRafLoopActive = false;
+            return;
+          }
+          const now = performance.now();
+          const batch = Array.from(backgroundRafCallbacks);
+          backgroundRafCallbacks.clear();
+          for (const cb of batch) {
+            try {
+              cb(now);
+            } catch (e) {
+              console.error(e);
+            }
+          }
+          if (document.hidden && backgroundRafCallbacks.size > 0) {
+            setTimeout(() => {
+              if (document.hidden && backgroundRafCallbacks.size > 0) {
+                bgChannel.port2.postMessage(null);
+              } else {
+                bgRafLoopActive = false;
+              }
+            }, 16);
+          } else {
+            bgRafLoopActive = false;
+          }
+        };
+      } catch {}
+
+      function scheduleBackgroundRaf() {
+        if (bgRafLoopActive) return;
+        bgRafLoopActive = true;
+        if (bgChannel) {
+          bgChannel.port2.postMessage(null);
+        } else {
+          setTimeout(() => {
+            bgRafLoopActive = false;
+            if (backgroundRafCallbacks.size === 0) return;
+            const now = performance.now();
+            const batch = Array.from(backgroundRafCallbacks);
+            backgroundRafCallbacks.clear();
+            for (const cb of batch) {
+              try {
+                cb(now);
+              } catch (e) {
+                console.error(e);
+              }
+            }
+            if (document.hidden && backgroundRafCallbacks.size > 0) {
+              scheduleBackgroundRaf();
+            }
+          }, 16);
+        }
+      }
+
+      window.requestAnimationFrame = function (cb) {
+        if (document.hidden) {
+          backgroundRafCallbacks.add(cb);
+          scheduleBackgroundRaf();
+          return 0;
+        }
+        return origRequestAnimationFrame(cb);
+      };
+
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') {
+        if (!document.hidden && backgroundRafCallbacks.size > 0) {
+          const now = performance.now();
+          const batch = Array.from(backgroundRafCallbacks);
+          backgroundRafCallbacks.clear();
+          for (const cb of batch) {
+            try {
+              cb(now);
+            } catch (e) {
+              console.error(e);
+            }
+          }
+        }
+        if (window.__audioUnlocked) {
           resumeAllAudio();
         }
       });
 
-      // Keep checking briefly during launch/unfocused input so suspended AudioContexts resume immediately
-      setInterval(() => {
-        if (document.visibilityState === 'visible') {
-          resumeAllAudio();
+      // Pause/gate game start until user clicks
+      window.addEventListener('pointerdown', async () => {
+        await resumeAllAudio();
+        if (window.__waitingForClickStart && typeof window.__onClickToStart === 'function') {
+          const cb = window.__onClickToStart;
+          window.__waitingForClickStart = false;
+          window.__onClickToStart = null;
+          cb();
         }
-      }, 250);
+      }, { capture: true, passive: true });
     })();
   </script>
 </head>
@@ -323,7 +424,52 @@
       "snd_jingle.ogg", "snd_mushroomdance.ogg", "snd_save.ogg", "snd_sonar.ogg"
     ];
 
-    function setProgress(pct, msg, subMsg) {
+    // Map WASD to Arrow keys (both keyCode and code/key)
+    const WASD_TO_ARROW = {
+      'KeyW': { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+      'KeyA': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+      'KeyS': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+      'KeyD': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+      87: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
+      65: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
+      83: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
+      68: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 }
+    };
+
+    function getMappedArrow(e) {
+      return WASD_TO_ARROW[e.code] || WASD_TO_ARROW[e.keyCode || e.which] || null;
+    }
+
+    function dispatchSyntheticArrowEvent(type, originalEvent, mapped) {
+      const synthetic = new KeyboardEvent(type, {
+        key: mapped.key,
+        code: mapped.code,
+        keyCode: mapped.keyCode,
+        which: mapped.keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        repeat: originalEvent.repeat
+      });
+      try {
+        Object.defineProperty(synthetic, 'keyCode', { get: () => mapped.keyCode });
+        Object.defineProperty(synthetic, 'which', { get: () => mapped.keyCode });
+        Object.defineProperty(synthetic, 'code', { get: () => mapped.code });
+        Object.defineProperty(synthetic, 'key', { get: () => mapped.key });
+      } catch {}
+      synthetic.__isMappedArrow = true;
+      canvas.dispatchEvent(synthetic);
+      window.dispatchEvent(synthetic);
+    }
+
+    let lastProgressPaint = 0;
+    function setProgress(pct, msg, subMsg, force = false) {
+      const now = performance.now();
+      if (!force && pct < 100 && now - lastProgressPaint < 32) {
+        return;
+      }
+      lastProgressPaint = now;
+
       const clamped = Math.min(100, Math.max(0, pct));
       fillEl.style.width = `${clamped}%`;
       pctEl.textContent = `${Math.round(clamped)}%`;
@@ -363,32 +509,90 @@
     }
 
     function bindButterscotchInputs(instance) {
+      const activeWasd = new Set();
+
       window.addEventListener('keydown', (e) => {
         if (window.__resumeGameAudio) window.__resumeGameAudio();
+
+        if (e.__isMappedArrow) {
+          if (typeof instance._onKeyDown === 'function') {
+            instance._onKeyDown(e.keyCode || e.which);
+          }
+          return;
+        }
+
+        const mapped = getMappedArrow(e);
+        if (mapped) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          const wasActive = activeWasd.has(mapped.keyCode);
+          activeWasd.add(mapped.keyCode);
+          if (!wasActive || !e.repeat) {
+            dispatchSyntheticArrowEvent('keydown', e, mapped);
+          }
+          if (typeof instance._onKeyDown === 'function') {
+            instance._onKeyDown(mapped.keyCode);
+          }
+          return;
+        }
+
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
           e.preventDefault();
         }
         if (typeof instance._onKeyDown === 'function') {
           instance._onKeyDown(e.keyCode || e.which);
         }
-      });
+      }, { capture: true });
 
       window.addEventListener('keyup', (e) => {
-        if (window.__resumeGameAudio) window.__resumeGameAudio();
+        if (e.__isMappedArrow) {
+          if (typeof instance._onKeyUp === 'function') {
+            instance._onKeyUp(e.keyCode || e.which);
+          }
+          return;
+        }
+
+        const mapped = getMappedArrow(e);
+        if (mapped) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          activeWasd.delete(mapped.keyCode);
+          dispatchSyntheticArrowEvent('keyup', e, mapped);
+          if (typeof instance._onKeyUp === 'function') {
+            instance._onKeyUp(mapped.keyCode);
+          }
+          return;
+        }
+
         if (typeof instance._onKeyUp === 'function') {
           instance._onKeyUp(e.keyCode || e.which);
         }
+      }, { capture: true });
+
+      window.addEventListener('blur', () => {
+        if (activeWasd.size > 0) {
+          activeWasd.forEach((arrowKeyCode) => {
+            if (typeof instance._onKeyUp === 'function') {
+              instance._onKeyUp(arrowKeyCode);
+            }
+          });
+          activeWasd.clear();
+        }
       });
 
+      let lastMouseMoveTime = 0;
       canvas.addEventListener('mousemove', (e) => {
-        if (window.__resumeGameAudio) window.__resumeGameAudio();
+        const now = performance.now();
+        if (now - lastMouseMoveTime < 16) return;
+        lastMouseMoveTime = now;
+
         if (typeof instance._onMouseMove === 'function') {
           const rect = canvas.getBoundingClientRect();
           const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
           const y = Math.round(((e.clientY - rect.top) / rect.height) * canvas.height);
           instance._onMouseMove(x, y);
         }
-      });
+      }, { passive: true });
 
       canvas.addEventListener('mousedown', (e) => {
         if (window.__resumeGameAudio) window.__resumeGameAudio();
@@ -400,7 +604,6 @@
       });
 
       window.addEventListener('mouseup', (e) => {
-        if (window.__resumeGameAudio) window.__resumeGameAudio();
         if (typeof instance._onMouseUp === 'function') {
           instance._onMouseUp(e.button);
         }
@@ -421,16 +624,16 @@
       } catch {}
 
       if (!hasDataWin) {
-        setProgress(2, '* Downloading core game data...', 'Fetching data.win');
+        setProgress(2, '* Downloading core game data...', 'Fetching data.win', true);
         const res = await fetch('./game/data.win');
         if (!res.ok) throw new Error(`Missing ./game/data.win (${res.status})`);
         await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
       }
 
       done++;
-      setProgress((done / total) * 100, '* Loading audio assets...', `File ${done} of ${total} (data.win ready)`);
+      setProgress((done / total) * 100, '* Loading audio assets...', `File ${done} of ${total} (data.win ready)`, true);
 
-      const BATCH_SIZE = 20;
+      const BATCH_SIZE = 32;
       for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
         const batch = OGG_FILES.slice(i, i + BATCH_SIZE);
         await Promise.all(
@@ -458,14 +661,23 @@
         );
       }
 
-      setProgress(100, '* Launching Undertale...', 'Initializing engine...');
+      setProgress(100, '* Click anywhere to start with sound...', 'Paused until click', true);
+    }
+
+    function waitForClickToStart() {
+      return new Promise((resolve) => {
+        window.__waitingForClickStart = true;
+        window.__onClickToStart = async () => {
+          if (window.__resumeGameAudio) {
+            await window.__resumeGameAudio();
+          }
+          resolve();
+        };
+      });
     }
 
     async function launchGame() {
       try {
-        window.focus();
-        canvas.focus();
-
         const instance = await createButterscotch({
           canvas,
           locateFile: (path) => `./${path}`
@@ -477,6 +689,8 @@
 
         bindButterscotchInputs(instance);
 
+        await waitForClickToStart();
+
         overlayEl.classList.add('fade-out');
         setTimeout(() => {
           overlayEl.style.display = 'none';
@@ -485,7 +699,9 @@
         window.focus();
         canvas.focus();
 
-        if (window.__resumeGameAudio) window.__resumeGameAudio();
+        if (window.__resumeGameAudio) {
+          await window.__resumeGameAudio();
+        }
 
         await callStartRunnerWithArgs(instance, ['/butterscotch/game/data.win']);
       } catch (err) {
