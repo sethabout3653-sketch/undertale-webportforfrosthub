@@ -77,9 +77,9 @@
     }
   </style>
 
-  <!-- Track AudioContext instances, gate game loop until unlocked by click, and pace background ticks at normal speed -->
+  <!-- Track AudioContext instances, gate game loop until unlocked by click, and run at uncapped max FPS -->
   <script>
-    (function setupAudioAndGate() {
+    (function setupAudioAndMaxFpsGate() {
       const trackedContexts = new Set();
       const NativeAudioContext = window.AudioContext || window.webkitAudioContext;
 
@@ -154,78 +154,49 @@
 
       window.__resumeGameAudio = resumeAllAudio;
 
-      // Keep background tab ticks paced at a single normal ~60fps step (no bursts or double-firing)
+      // Uncapped native display refresh rate in foreground + zero-delay MessageChannel pump in background
       const origRequestAnimationFrame = window.requestAnimationFrame.bind(window);
-      const TARGET_FRAME_MS = 1000 / 60;
-      const MIN_FRAME_GAP_MS = 14;
-      let queuedBackgroundCb = null;
-      let bgTimerId = null;
-      let lastFrameTime = performance.now();
+      const channel = new MessageChannel();
+      const bgCallbacks = new Map();
+      let nextBgId = 1;
 
-      function clearBackgroundTimer() {
-        if (bgTimerId !== null) {
-          clearTimeout(bgTimerId);
-          bgTimerId = null;
-        }
-      }
-
-      function pumpBackgroundFrame() {
-        bgTimerId = null;
-        if (!queuedBackgroundCb) return;
-
+      channel.port1.onmessage = () => {
+        if (bgCallbacks.size === 0) return;
+        const batch = Array.from(bgCallbacks.entries());
+        bgCallbacks.clear();
         const now = performance.now();
-        const elapsed = now - lastFrameTime;
-        if (elapsed < MIN_FRAME_GAP_MS) {
-          bgTimerId = setTimeout(pumpBackgroundFrame, Math.max(1, TARGET_FRAME_MS - elapsed));
-          return;
+        for (const [, cb] of batch) {
+          try {
+            cb(now);
+          } catch (e) {
+            console.error(e);
+          }
         }
-
-        lastFrameTime = now;
-        const cb = queuedBackgroundCb;
-        queuedBackgroundCb = null;
-        try {
-          cb(now);
-        } catch (e) {
-          console.error(e);
-        }
-
-        if (queuedBackgroundCb && bgTimerId === null) {
-          bgTimerId = setTimeout(pumpBackgroundFrame, TARGET_FRAME_MS);
-        }
-      }
+      };
 
       window.requestAnimationFrame = function (cb) {
         if (document.hidden) {
-          queuedBackgroundCb = cb;
-          if (bgTimerId === null) {
-            const elapsed = performance.now() - lastFrameTime;
-            const delay = Math.max(0, TARGET_FRAME_MS - elapsed);
-            bgTimerId = setTimeout(pumpBackgroundFrame, delay);
+          const id = nextBgId++;
+          bgCallbacks.set(id, cb);
+          if (bgCallbacks.size === 1) {
+            channel.port2.postMessage(null);
           }
-          return 0;
+          return id;
         }
-        clearBackgroundTimer();
-        queuedBackgroundCb = null;
-        return origRequestAnimationFrame((ts) => {
-          lastFrameTime = performance.now();
-          cb(ts);
-        });
+        return origRequestAnimationFrame(cb);
+      };
+
+      const origCancelAnimationFrame = window.cancelAnimationFrame.bind(window);
+      window.cancelAnimationFrame = function (id) {
+        bgCallbacks.delete(id);
+        return origCancelAnimationFrame(id);
       };
 
       document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) {
-          clearBackgroundTimer();
-          if (queuedBackgroundCb) {
-            const cb = queuedBackgroundCb;
-            queuedBackgroundCb = null;
-            origRequestAnimationFrame((ts) => {
-              lastFrameTime = performance.now();
-              cb(ts);
-            });
-          }
-        } else if (queuedBackgroundCb && bgTimerId === null) {
-          const elapsed = performance.now() - lastFrameTime;
-          bgTimerId = setTimeout(pumpBackgroundFrame, Math.max(0, TARGET_FRAME_MS - elapsed));
+        if (!document.hidden && bgCallbacks.size > 0) {
+          const batch = Array.from(bgCallbacks.values());
+          bgCallbacks.clear();
+          batch.forEach((cb) => origRequestAnimationFrame(cb));
         }
 
         if (window.__audioUnlocked) {
@@ -323,59 +294,23 @@
       "snd_jingle.ogg", "snd_mushroomdance.ogg", "snd_save.ogg", "snd_sonar.ogg"
     ];
 
-    // Map WASD to Arrow keys (both keyCode and code/key)
-    const WASD_TO_ARROW = {
-      'KeyW': { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-      'KeyA': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-      'KeyS': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-      'KeyD': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-      87: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-      65: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-      83: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-      68: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 }
-    };
+    // Save files in OPFS that should be preserved across game file updates
+    const SAVE_FILE_PATTERNS = [
+      /^file0$/i,
+      /^file8$/i,
+      /^file9$/i,
+      /^undertale\.ini$/i,
+      /^config\.ini$/i,
+      /\.sav$/i,
+      /\.save$/i,
+      /\.ini$/i
+    ];
 
-    function isBlockedKey(e) {
-      const code = e.code;
-      const key = (e.key || '').toLowerCase();
-      const keyCode = e.keyCode || e.which;
-      return code === 'KeyV' || code === 'KeyL' || key === 'v' || key === 'l' || keyCode === 86 || keyCode === 76;
+    function isSaveFile(name) {
+      return SAVE_FILE_PATTERNS.some((rx) => rx.test(name));
     }
 
-    function getMappedArrow(e) {
-      return WASD_TO_ARROW[e.code] || WASD_TO_ARROW[e.keyCode || e.which] || null;
-    }
-
-    function dispatchSyntheticArrowEvent(type, originalEvent, mapped) {
-      const synthetic = new KeyboardEvent(type, {
-        key: mapped.key,
-        code: mapped.code,
-        keyCode: mapped.keyCode,
-        which: mapped.keyCode,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        repeat: originalEvent.repeat
-      });
-      try {
-        Object.defineProperty(synthetic, 'keyCode', { get: () => mapped.keyCode });
-        Object.defineProperty(synthetic, 'which', { get: () => mapped.keyCode });
-        Object.defineProperty(synthetic, 'code', { get: () => mapped.code });
-        Object.defineProperty(synthetic, 'key', { get: () => mapped.key });
-      } catch {}
-      synthetic.__isMappedArrow = true;
-      canvas.dispatchEvent(synthetic);
-      window.dispatchEvent(synthetic);
-    }
-
-    let lastProgressPaint = 0;
-    function setProgress(pct, msg, subMsg, force = false) {
-      const now = performance.now();
-      if (!force && pct < 100 && now - lastProgressPaint < 32) {
-        return;
-      }
-      lastProgressPaint = now;
-
+    function setProgress(pct, msg, subMsg) {
       const clamped = Math.min(100, Math.max(0, pct));
       fillEl.style.width = `${clamped}%`;
       pctEl.textContent = `${Math.round(clamped)}%`;
@@ -398,6 +333,30 @@
       await writable.close();
     }
 
+    // Clear stale game assets in OPFS while keeping player save files intact
+    async function clearStaleGameFiles(gameDir) {
+      if (typeof gameDir.entries !== 'function') return;
+      const removals = [];
+      for await (const [entryName, handle] of gameDir.entries()) {
+        if (handle.kind === 'file' && !isSaveFile(entryName)) {
+          removals.push(gameDir.removeEntry(entryName).catch(() => {}));
+        }
+      }
+      await Promise.all(removals);
+    }
+
+    // Fetch fresh asset bypassing HTTP/browser cache so updated files on disk are always used
+    async function fetchFreshBytes(url) {
+      const sep = url.includes('?') ? '&' : '?';
+      const bustUrl = `${url}${sep}_t=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const res = await fetch(bustUrl, { cache: 'no-store' });
+      if (!res.ok) {
+        return { ok: false, status: res.status, bytes: null };
+      }
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      return { ok: true, status: res.status, bytes };
+    }
+
     function callStartRunnerWithArgs(instance, args) {
       const argvPtrs = args.map((str) => instance.stringToNewUTF8(str));
       const argvTable = new Uint32Array(argvPtrs.length + 1);
@@ -414,48 +373,8 @@
     }
 
     function bindButterscotchInputs(instance) {
-      const activeWasd = new Set();
-
-      ['keydown', 'keyup', 'keypress'].forEach((evtName) => {
-        window.addEventListener(evtName, (e) => {
-          if (isBlockedKey(e)) {
-            e.preventDefault();
-            e.stopPropagation();
-            e.stopImmediatePropagation();
-          }
-        }, { capture: true });
-      });
-
       window.addEventListener('keydown', (e) => {
-        if (isBlockedKey(e)) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          return;
-        }
-
         if (window.__resumeGameAudio) window.__resumeGameAudio();
-
-        if (e.__isMappedArrow) {
-          if (typeof instance._onKeyDown === 'function') {
-            instance._onKeyDown(e.keyCode || e.which);
-          }
-          return;
-        }
-
-        const mapped = getMappedArrow(e);
-        if (mapped) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          const wasActive = activeWasd.has(mapped.keyCode);
-          activeWasd.add(mapped.keyCode);
-          if (!wasActive || !e.repeat) {
-            dispatchSyntheticArrowEvent('keydown', e, mapped);
-          }
-          if (typeof instance._onKeyDown === 'function') {
-            instance._onKeyDown(mapped.keyCode);
-          }
-          return;
-        }
 
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', ' '].includes(e.key)) {
           e.preventDefault();
@@ -466,53 +385,12 @@
       }, { capture: true });
 
       window.addEventListener('keyup', (e) => {
-        if (isBlockedKey(e)) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          return;
-        }
-
-        if (e.__isMappedArrow) {
-          if (typeof instance._onKeyUp === 'function') {
-            instance._onKeyUp(e.keyCode || e.which);
-          }
-          return;
-        }
-
-        const mapped = getMappedArrow(e);
-        if (mapped) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          activeWasd.delete(mapped.keyCode);
-          dispatchSyntheticArrowEvent('keyup', e, mapped);
-          if (typeof instance._onKeyUp === 'function') {
-            instance._onKeyUp(mapped.keyCode);
-          }
-          return;
-        }
-
         if (typeof instance._onKeyUp === 'function') {
           instance._onKeyUp(e.keyCode || e.which);
         }
       }, { capture: true });
 
-      window.addEventListener('blur', () => {
-        if (activeWasd.size > 0) {
-          activeWasd.forEach((arrowKeyCode) => {
-            if (typeof instance._onKeyUp === 'function') {
-              instance._onKeyUp(arrowKeyCode);
-            }
-          });
-          activeWasd.clear();
-        }
-      });
-
-      let lastMouseMoveTime = 0;
       canvas.addEventListener('mousemove', (e) => {
-        const now = performance.now();
-        if (now - lastMouseMoveTime < 16) return;
-        lastMouseMoveTime = now;
-
         if (typeof instance._onMouseMove === 'function') {
           const rect = canvas.getBoundingClientRect();
           const x = Math.round(((e.clientX - rect.left) / rect.width) * canvas.width);
@@ -541,43 +419,31 @@
       const opfsRoot = await navigator.storage.getDirectory();
       const gameDir = await opfsRoot.getDirectoryHandle('game', { create: true });
 
+      setProgress(1, 'Updating game files...', 'Clearing old game cache (keeping saves)');
+      await clearStaleGameFiles(gameDir);
+
       const total = 1 + OGG_FILES.length;
       let done = 0;
 
-      let hasDataWin = false;
-      try {
-        const f = await (await gameDir.getFileHandle('data.win')).getFile();
-        if (f.size > 1000000) hasDataWin = true;
-      } catch {}
-
-      if (!hasDataWin) {
-        setProgress(2, 'Loading...', 'data.win', true);
-        const res = await fetch('./game/data.win');
-        if (!res.ok) throw new Error(`Missing ./game/data.win (${res.status})`);
-        await writeToOpfs(gameDir, 'data.win', new Uint8Array(await res.arrayBuffer()));
+      setProgress(2, 'Loading...', 'data.win');
+      const dataWinResult = await fetchFreshBytes('./game/data.win');
+      if (!dataWinResult.ok || !dataWinResult.bytes || dataWinResult.bytes.length === 0) {
+        throw new Error(`Missing or empty ./game/data.win (${dataWinResult.status})`);
       }
+      await writeToOpfs(gameDir, 'data.win', dataWinResult.bytes);
 
       done++;
-      setProgress((done / total) * 100, 'Loading...', `${done} / ${total}`, true);
+      setProgress((done / total) * 100, 'Loading...', `${done} / ${total}`);
 
-      const BATCH_SIZE = 32;
+      const BATCH_SIZE = 64;
       for (let i = 0; i < OGG_FILES.length; i += BATCH_SIZE) {
         const batch = OGG_FILES.slice(i, i + BATCH_SIZE);
         await Promise.all(
           batch.map(async (name) => {
-            let cached = false;
-            try {
-              const f = await (await gameDir.getFileHandle(name)).getFile();
-              if (f.size > 0) cached = true;
-            } catch {}
-
-            if (!cached) {
-              const res = await fetch(`./game/${name}`);
-              if (res.ok) {
-                await writeToOpfs(gameDir, name, new Uint8Array(await res.arrayBuffer()));
-              }
+            const oggResult = await fetchFreshBytes(`./game/${name}`);
+            if (oggResult.ok && oggResult.bytes) {
+              await writeToOpfs(gameDir, name, oggResult.bytes);
             }
-
             done++;
             setProgress(
               (done / total) * 100,
@@ -588,7 +454,7 @@
         );
       }
 
-      setProgress(100, 'Click to start', 'Paused until click', true);
+      setProgress(100, 'Click to start', 'Paused until click');
     }
 
     function waitForClickToStart() {
@@ -607,11 +473,16 @@
       try {
         const instance = await createButterscotch({
           canvas,
-          locateFile: (path) => `./${path}`
+          locateFile: (path) => `./${path}?_t=${Date.now()}`
         });
 
         if (typeof instance._mountOpfs === 'function') {
           await instance._mountOpfs();
+        }
+
+        // Force Emscripten main loop to run at full uncapped VSync/rAF rate
+        if (typeof instance._emscripten_set_main_loop_timing === 'function') {
+          instance._emscripten_set_main_loop_timing(0, 1);
         }
 
         bindButterscotchInputs(instance);
